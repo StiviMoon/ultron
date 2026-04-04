@@ -13,9 +13,21 @@ Local SQLite — no accounts, no API keys, no cloud.
 npm install -g github:StiviMoon/ultron
 ```
 
-> Requires Node.js >= 18 and a C++ compiler (for `better-sqlite3`).  
+> **Requires Node.js >= 18** and a C++ compiler (for `better-sqlite3`).  
 > On Ubuntu/Debian: `sudo apt install build-essential`  
 > On macOS: Xcode Command Line Tools (`xcode-select --install`)
+
+**Linux permission error?** If you get `EACCES: permission denied`, configure npm to install in your home directory (no sudo needed):
+
+```bash
+mkdir -p ~/.npm-global
+npm config set prefix '~/.npm-global'
+echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
+# Then install normally:
+npm install -g github:StiviMoon/ultron
+```
 
 ---
 
