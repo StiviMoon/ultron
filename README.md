@@ -10,24 +10,15 @@ Local SQLite — no accounts, no API keys, no cloud.
 ## Install
 
 ```bash
-npm install -g github:StiviMoon/ultron
+git clone https://github.com/StiviMoon/ultron
+cd ultron
+npm install
+npm run build
 ```
 
 > **Requires Node.js >= 18** and a C++ compiler (for `better-sqlite3`).  
 > On Ubuntu/Debian: `sudo apt install build-essential`  
 > On macOS: Xcode Command Line Tools (`xcode-select --install`)
-
-**Linux permission error?** If you get `EACCES: permission denied`, configure npm to install in your home directory (no sudo needed):
-
-```bash
-mkdir -p ~/.npm-global
-npm config set prefix '~/.npm-global'
-echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-
-# Then install normally:
-npm install -g github:StiviMoon/ultron
-```
 
 ---
 
@@ -39,11 +30,15 @@ Add to `~/.mcp.json` (global) or your project's `.mcp.json`:
 {
   "mcpServers": {
     "ultron": {
-      "command": "ultron-hub"
+      "command": "node",
+      "args": ["/absolute/path/to/ultron/dist/index.js"]
     }
   }
 }
 ```
+
+Replace `/absolute/path/to/ultron` with the actual path where you cloned the repo.  
+Example: `/home/youruser/tools/ultron/dist/index.js`
 
 Restart Claude Code. You'll see `✓ ultron: ultron-hub v5.0.0 — Connected`.
 
@@ -55,7 +50,8 @@ Go to **Settings → MCP** and add:
 {
   "mcpServers": {
     "ultron": {
-      "command": "ultron-hub"
+      "command": "node",
+      "args": ["/absolute/path/to/ultron/dist/index.js"]
     }
   }
 }
@@ -188,7 +184,7 @@ Reads all `warning` and `pattern` memories and outputs ready-to-paste CLAUDE.md 
 
 ## Avoid
 - Never mock the database in integration tests — mocked tests passed but prod migration failed
-- Don't use positional task IDs in parallel calls — positions shift when tasks are completed
+- Don't use positional task IDs in parallel calls — positions shift when tasks complete
 
 ## Follow
 - All API responses use { success, data?, error? } — never return raw data
@@ -213,13 +209,25 @@ import_project('<json>', "merge")
 
 ---
 
+## Updating
+
+```bash
+cd ultron
+git pull
+npm run build
+```
+
+Restart Claude Code / Cursor after updating.
+
+---
+
 ## Data
 
 All data lives in `~/.ultron/ultron.db` — a single SQLite file.
 
 ```bash
 # Custom location
-ULTRON_DB_PATH=/custom/path/ultron.db ultron-hub
+ULTRON_DB_PATH=/custom/path/ultron.db node dist/index.js
 
 # Backup
 cp ~/.ultron/ultron.db ~/backups/ultron-$(date +%Y%m%d).db
@@ -230,7 +238,7 @@ cp ~/.ultron/ultron.db ~/backups/ultron-$(date +%Y%m%d).db
 ## Requirements
 
 - Node.js >= 18
-- C++ build tools (for `better-sqlite3`)
+- C++ build tools (`build-essential` on Linux, Xcode CLI on macOS)
 - No external services, accounts, or API keys
 
 ---
