@@ -2,208 +2,227 @@
 
 > Your AI assistant forgets everything between sessions. ULTRON fixes that.
 
-Persistent developer memory for **Claude Code**, **Cursor**, and any MCP-compatible tool. Local SQLite database, zero config, one command to install.
+Persistent developer memory for **Claude Code**, **Cursor**, and any MCP-compatible tool.  
+Local SQLite — no accounts, no API keys, no cloud.
+
+---
+
+## Install
 
 ```bash
-npm install -g github:stivimoon/ultron-hub
+npm install -g github:StiviMoon/ultron
 ```
 
-## The Problem
+> Requires Node.js >= 18 and a C++ compiler (for `better-sqlite3`).  
+> On Ubuntu/Debian: `sudo apt install build-essential`  
+> On macOS: Xcode Command Line Tools (`xcode-select --install`)
 
-Every time you open Claude Code or Cursor, your AI starts from zero. You re-explain your stack, your decisions, where you left off. Every session costs tokens rebuilding context that already existed.
+---
 
-ULTRON gives your AI a brain that persists across sessions and tools.
+## Connect to Claude Code
+
+Add to `~/.mcp.json` (global) or your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ultron": {
+      "command": "ultron-hub"
+    }
+  }
+}
+```
+
+Restart Claude Code. You'll see `✓ ultron: ultron-hub v5.0.0 — Connected`.
+
+## Connect to Cursor
+
+Go to **Settings → MCP** and add:
+
+```json
+{
+  "mcpServers": {
+    "ultron": {
+      "command": "ultron-hub"
+    }
+  }
+}
+```
+
+---
 
 ## How It Works
 
 ```
-~/.ultron/ultron.db ← Local SQLite (auto-created on first run)
-        │
-        ├── Claude Code (MCP)
-        ├── Cursor (MCP)
-        └── Claude.ai / ChatGPT (via handoff)
+~/.ultron/ultron.db   ← SQLite, auto-created on first run
+         │
+         ├── Claude Code (MCP)
+         ├── Cursor (MCP)
+         └── Claude.ai / ChatGPT (via handoff tool)
 ```
 
-All tools read and write to the same local brain. When you switch tools, your context is already there.
+All tools share the same local database. Switch tools mid-session — your context is already there.
 
-## Quick Start
+---
 
-### 1. Install
+## The 3-step workflow
 
-```bash
-npm install -g github:stivimoon/ultron-hub
+**1. Start every session:**
+```
+session_start("my-project", "claude-code")
+```
+Returns last session summary, pending tasks, knowledge base, and recent decisions. Ready to work in one call.
+
+**2. Save knowledge as you go:**
+```
+remember("my-project", "api-pattern", "All endpoints return { success, data?, error? }", "pattern")
+decision("my-project", "database", "PostgreSQL", "better Prisma support than MySQL")
+task("my-project", "add", "implement Stripe webhook")
+note("my-project", "check Stripe rate limits in test mode")
 ```
 
-### 2. Connect to Claude Code
-
-Add to your global config (`~/.claude/settings.json`) or project `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "ultron": {
-      "command": "ultron-hub"
-    }
-  }
-}
+**3. Close the session:**
+```
+session_end("my-project", "claude-code", "finished PaymentForm, webhook pending", ["src/PaymentForm.tsx"])
 ```
 
-### 3. Connect to Cursor
+---
 
-Go to **Settings > MCP** and add:
+## All 16 Tools
 
-```json
-{
-  "mcpServers": {
-    "ultron": {
-      "command": "ultron-hub"
-    }
-  }
-}
-```
-
-### 4. Use it
-
-Restart your tool. ULTRON's 16 tools are now available.
-
-## Tools
-
-### Memory & Context
+### Memory
 
 | Tool | What it does |
 |---|---|
-| `recall` | Load full project context (sessions, memories, tasks, decisions) |
-| `remember` | Save persistent key-value knowledge with categories |
+| `session_start` | Start session + auto-load full project context |
+| `recall` | Load project context manually (slim mode, field filter) |
+| `remember` | Save persistent key-value knowledge |
 | `note` | Quick thought with auto-generated key |
-| `forget` | Delete a specific memory |
-| `search` | Full-text search across memories, decisions, tasks (FTS5) |
+| `forget` | Delete a memory by key |
+| `search` | Full-text search (FTS5) across memories, decisions, tasks |
 
 ### Tasks & Decisions
 
 | Tool | What it does |
 |---|---|
-| `task` | Manage backlog: add, update, done, delete, list |
+| `task` | Backlog management: `add`, `update`, `done`, `delete`, `list` |
 | `decision` | Log an immutable technical decision |
 | `list_decisions` | Full decision history with pagination |
 
-### Sessions
+### Sessions & Projects
 
 | Tool | What it does |
 |---|---|
-| `session_start` | Start a work session + auto-load context |
-| `session_end` | Close session with summary of what was done |
-| `projects` | List all projects with stats |
+| `session_end` | Close session with summary and files touched |
+| `projects` | List all projects with stats (tasks, memories, decisions) |
+| `handoff` | Generate markdown context block for Claude.ai / ChatGPT |
 
 ### Intelligence
 
 | Tool | What it does |
 |---|---|
-| `generate_rules` | Convert your warnings/patterns into CLAUDE.md rules |
-| `token_budget` | Estimate token cost per project, get optimization tips |
-| `handoff` | Generate markdown context for Claude.ai or ChatGPT |
+| `generate_rules` | Convert stored warnings/patterns into CLAUDE.md rules |
+| `token_budget` | Estimate token cost per project + optimization suggestions |
 
 ### Sync
 
 | Tool | What it does |
 |---|---|
-| `export_project` | Export project data as JSON |
-| `import_project` | Import JSON data (merge or replace) |
+| `export_project` | Export all project data as JSON |
+| `import_project` | Import JSON with `merge` or `replace` strategy |
 
-## Typical Workflow
-
-**Starting a session:**
-```
-session_start("my-project", "claude-code")
-→ Last session: implemented PaymentForm.tsx
-  Pending: Stripe webhook
-  Decision: Stripe Elements over Culqi
-```
-
-**During work:**
-```
-remember("my-project", "api-pattern", "All endpoints return { success, data?, error? }", "pattern")
-decision("my-project", "payments", "Stripe", "has official TypeScript SDK")
-task("my-project", "add", "implement /api/stripe webhook")
-```
-
-**Closing:**
-```
-session_end("my-project", "claude-code", "finished form validation, webhook pending", ["src/PaymentForm.tsx"])
-```
-
-**Switching to Claude.ai:**
-```
-handoff("my-project")
-→ Markdown block ready to paste
-```
+---
 
 ## Memory Categories
 
 | Category | Use |
 |---|---|
-| `fact` | Concrete project data: stack, URLs, versions |
-| `pattern` | Code or architecture patterns to follow |
-| `preference` | Team conventions, style rules |
-| `warning` | Things to avoid, known bugs, gotchas |
-| `note` | Free-form observations |
+| `fact` | Stack, URLs, versions, env var names |
+| `pattern` | Architecture patterns, code conventions to follow |
+| `preference` | Team style, tools chosen, personal workflow |
+| `warning` | Things to avoid — known bugs, gotchas, past mistakes |
+| `note` | Free-form observations and quick thoughts |
+
+`warning` and `pattern` are the most valuable — they become CLAUDE.md rules via `generate_rules`.
+
+---
 
 ## Token Efficiency
 
-ULTRON is designed to minimize token waste:
+```
+# Slim mode: keys only, no values — saves ~80% tokens on memories
+session_start("project", "claude-code", slim=true)
 
-- **Slim mode**: `recall(project, slim=true)` returns only keys — saves ~80% tokens
-- **Field filter**: Load only what you need: `fields=["tasks"]`
-- **Value truncation**: Long memories are auto-truncated in recall (configurable)
-- **Token budget**: `token_budget(project)` shows exactly what each section costs
-- **Stale detection**: Memories not accessed in 45+ days are flagged for cleanup
-- **Generate rules**: Turn your experience into CLAUDE.md rules for permanent, zero-token-cost guidance
+# Load only what you need
+recall("project", fields=["tasks"])
+recall("project", fields=["memories", "decisions"])
 
-## Data Location
-
-All data lives in `~/.ultron/ultron.db`. To customize:
-
-```bash
-ULTRON_DB_PATH=/custom/path/ultron.db ultron-hub
+# Check token cost before it becomes a problem
+token_budget("project")
 ```
 
-Backup is trivial — it's a single file.
+---
+
+## Generate CLAUDE.md Rules
+
+```
+generate_rules("my-project")
+```
+
+Reads all `warning` and `pattern` memories and outputs ready-to-paste CLAUDE.md rules:
+
+```markdown
+# Project Rules: my-project
+
+## Avoid
+- Never mock the database in integration tests — mocked tests passed but prod migration failed
+- Don't use positional task IDs in parallel calls — positions shift when tasks are completed
+
+## Follow
+- All API responses use { success, data?, error? } — never return raw data
+- Controllers never access the DB directly — always go through services
+```
+
+Paste into your project's `CLAUDE.md` for permanent, zero-token guidance.
+
+---
 
 ## Sync Between Machines
 
 ```
-# Machine A
-export_project("my-project") → save the JSON
+# Machine A — export
+export_project("my-project")
+# → Copy the JSON from the response
 
-# Machine B
-import_project(json, "merge") → data merged into local DB
+# Machine B — import
+import_project('<json>', "merge")
+# merge = keep newer data  |  replace = overwrite everything
 ```
 
-## Generate CLAUDE.md Rules
+---
 
-ULTRON learns from your work. The `generate_rules` tool converts your stored warnings and patterns into CLAUDE.md rules:
+## Data
 
+All data lives in `~/.ultron/ultron.db` — a single SQLite file.
+
+```bash
+# Custom location
+ULTRON_DB_PATH=/custom/path/ultron.db ultron-hub
+
+# Backup
+cp ~/.ultron/ultron.db ~/backups/ultron-$(date +%Y%m%d).db
 ```
-generate_rules("my-project")
-→ # Project Rules: my-project
-  ## Avoid
-  - Never mock the database in integration tests
-  - Positional task IDs shift in parallel calls — use UUIDs
-  ## Follow
-  - All API responses use { success, data?, error? }
-  - Controllers delegate to services, never access DB directly
-```
 
-Paste this into your project's `CLAUDE.md` for permanent, zero-cost guidance.
+---
 
 ## Requirements
 
 - Node.js >= 18
-- No external services, accounts, or API keys needed
-
-## License
-
-MIT
+- C++ build tools (for `better-sqlite3`)
+- No external services, accounts, or API keys
 
 ---
 
-Built by [Steven Rodriguez](https://github.com/stivimoon). PRs, issues, and contributions welcome.
+## License
+
+MIT — [github.com/StiviMoon/ultron](https://github.com/StiviMoon/ultron)
