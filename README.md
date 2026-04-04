@@ -5,7 +5,7 @@
 Persistent developer memory for **Claude Code**, **Cursor**, and any MCP-compatible tool. Local SQLite database, zero config, one command to install.
 
 ```bash
-npm install -g github:stevenvo780/ultron-hub
+npm install -g github:stivimoon/ultron-hub
 ```
 
 ## The Problem
@@ -31,7 +31,7 @@ All tools read and write to the same local brain. When you switch tools, your co
 ### 1. Install
 
 ```bash
-npm install -g github:stevenvo780/ultron-hub
+npm install -g github:stivimoon/ultron-hub
 ```
 
 ### 2. Connect to Claude Code
@@ -206,4 +206,4 @@ MIT
 
 ---
 
-Built by [Steven Villarreal](https://github.com/stevenvo780). PRs, issues, and contributions welcome.
+Built by [Steven Rodriguez](https://github.com/stivimoon). PRs, issues, and contributions welcome.
