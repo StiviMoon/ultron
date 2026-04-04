@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS memories (
   tool             TEXT,
   expires_at       TEXT,
   last_accessed_at TEXT,
+  related          TEXT DEFAULT '[]',
   created_at       TEXT DEFAULT (datetime('now')),
   updated_at       TEXT DEFAULT (datetime('now')),
   UNIQUE (project, key)
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS tasks (
               CHECK (status IN ('pending','done')),
   priority    TEXT NOT NULL DEFAULT 'medium'
               CHECK (priority IN ('high','medium','low')),
+  tags        TEXT DEFAULT '[]',
   tool        TEXT,
   created_at  TEXT DEFAULT (datetime('now')),
   done_at     TEXT
@@ -105,7 +107,7 @@ END;
 
 -- Schema versioning
 CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '5');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '6');
 `;
 function initDb() {
   mkdirSync(ULTRON_DIR, { recursive: true });
@@ -114,6 +116,15 @@ function initDb() {
   db2.pragma("busy_timeout = 5000");
   db2.pragma("foreign_keys = ON");
   db2.exec(SCHEMA_SQL);
+  try {
+    db2.exec("ALTER TABLE memories ADD COLUMN related TEXT DEFAULT '[]'");
+  } catch {
+  }
+  try {
+    db2.exec("ALTER TABLE tasks ADD COLUMN tags TEXT DEFAULT '[]'");
+  } catch {
+  }
+  db2.prepare("INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', '6')").run();
   return db2;
 }
 var db = initDb();
@@ -154,7 +165,10 @@ function fetchProjectContext(project, options = {}) {
     "SELECT * FROM sessions WHERE project = ? AND ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 5"
   ).all(project) : null;
   const memories = load("memories") ? db.prepare(
-    "SELECT * FROM memories WHERE project = ? ORDER BY updated_at DESC LIMIT 30"
+    `SELECT * FROM memories WHERE project = ?
+         ORDER BY CASE category WHEN 'warning' THEN 0 WHEN 'pattern' THEN 1 ELSE 2 END,
+                  updated_at DESC
+         LIMIT 30`
   ).all(project) : null;
   const tasks = load("tasks") ? db.prepare(
     `SELECT * FROM tasks WHERE project = ? AND status = 'pending'
@@ -178,13 +192,21 @@ function fetchProjectContext(project, options = {}) {
     if (slim) {
       return { key: m.key, category: m.category, ...expired && { expired: true } };
     }
+    const relatedKeys = (() => {
+      try {
+        return JSON.parse(m.related || "[]");
+      } catch {
+        return [];
+      }
+    })();
     return {
       key: m.key,
       value: truncate(m.value ?? "", maxValueLength),
       category: m.category,
       ...expired && { expired: true },
       ...m.expires_at && !expired && { expires_at: m.expires_at },
-      ...m.value?.length > maxValueLength && { truncated: true }
+      ...m.value?.length > maxValueLength && { truncated: true },
+      ...relatedKeys.length > 0 && { related: relatedKeys }
     };
   }) : null;
   return {
@@ -218,7 +240,7 @@ function fetchProjectContext(project, options = {}) {
 }
 var server = new McpServer({
   name: "ultron-hub",
-  version: "5.0.0"
+  version: "6.0.0"
 });
 server.tool(
   "recall",
@@ -260,9 +282,10 @@ Categories:
     value: z.string().describe("The knowledge to save"),
     category: z.enum(["fact", "pattern", "preference", "warning", "note"]).default("fact").describe("Type of knowledge"),
     expires_at: z.string().optional().describe("Optional ISO expiration date. Ex: '2026-06-01'. After this date the memory shows as [EXPIRED]."),
+    related: z.array(z.string()).optional().describe("Keys of related memories. Ex: ['api-pattern', 'auth-flow']. Creates a knowledge graph."),
     tool: z.string().optional().describe("Tool saving this. Ex: 'claude-code', 'cursor'")
   },
-  ({ project, key, value, category, expires_at, tool }) => {
+  ({ project, key, value, category, expires_at, related, tool }) => {
     try {
       if (value.length > 1e4) {
         return err("Value exceeds 10,000 character limit. Save only essential information.");
@@ -283,16 +306,18 @@ Categories:
         );
       }
       const id = uuid();
+      const relatedJson = JSON.stringify(related ?? []);
       db.prepare(
-        `INSERT INTO memories (id, project, key, value, category, tool, updated_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO memories (id, project, key, value, category, tool, updated_at, expires_at, related)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (project, key) DO UPDATE SET
            value = excluded.value,
            category = excluded.category,
            tool = excluded.tool,
            updated_at = excluded.updated_at,
-           expires_at = excluded.expires_at`
-      ).run(id, project, key, value, category, tool ?? "claude-code", now(), expires_at ?? null);
+           expires_at = excluded.expires_at,
+           related = excluded.related`
+      ).run(id, project, key, value, category, tool ?? "claude-code", now(), expires_at ?? null, relatedJson);
       return ok({
         saved: true,
         project,
@@ -300,6 +325,7 @@ Categories:
         category,
         value,
         ...expires_at && { expires_at },
+        ...related && related.length > 0 && { related },
         ...warnings.length > 0 && { warnings }
       });
     } catch (e) {
@@ -484,9 +510,12 @@ Positions (1, 2, 3...) come from recall or task list results.`,
     priority: z.enum(["high", "medium", "low"]).optional().default("medium").describe("Task priority \u2014 for action=add"),
     newText: z.string().optional().describe("New task text \u2014 only for action=update"),
     newPriority: z.enum(["high", "medium", "low"]).optional().describe("New priority \u2014 only for action=update"),
+    tags: z.array(z.string()).optional().describe("Tags for the task \u2014 for action=add. Ex: ['auth', 'urgent']"),
+    newTags: z.array(z.string()).optional().describe("Replace tags \u2014 only for action=update"),
+    filter_tag: z.string().optional().describe("Filter by tag \u2014 only for action=list"),
     tool: z.string().optional()
   },
-  ({ project, action, text: taskText, id, priority, newText, newPriority, tool }) => {
+  ({ project, action, text: taskText, id, priority, newText, newPriority, tags, newTags, filter_tag, tool }) => {
     try {
       let resolveId2 = function(rawId) {
         const pos = parseInt(rawId);
@@ -502,14 +531,15 @@ Positions (1, 2, 3...) come from recall or task list results.`,
       if (action === "add") {
         if (!taskText) return err("'text' is required for action=add");
         const id2 = uuid();
+        const tagsJson = JSON.stringify(tags ?? []);
         db.prepare(
-          "INSERT INTO tasks (id, project, text, priority, tool) VALUES (?, ?, ?, ?, ?)"
-        ).run(id2, project, taskText, priority ?? "medium", tool ?? "claude-code");
-        return ok({ added: true, id: id2, text: taskText, priority: priority ?? "medium" });
+          "INSERT INTO tasks (id, project, text, priority, tags, tool) VALUES (?, ?, ?, ?, ?, ?)"
+        ).run(id2, project, taskText, priority ?? "medium", tagsJson, tool ?? "claude-code");
+        return ok({ added: true, id: id2, text: taskText, priority: priority ?? "medium", ...tags?.length && { tags } });
       }
       if (action === "update") {
         if (!id) return err("'id' is required for action=update");
-        if (!newText && !newPriority) return err("'newText' or 'newPriority' required for action=update");
+        if (!newText && !newPriority && !newTags) return err("'newText', 'newPriority', or 'newTags' required for action=update");
         const targetId = resolveId2(id);
         if (!targetId) return err(`No task at position ${id} or ID not found.`);
         const sets = [];
@@ -522,11 +552,15 @@ Positions (1, 2, 3...) come from recall or task list results.`,
           sets.push("priority = ?");
           vals.push(newPriority);
         }
+        if (newTags) {
+          sets.push("tags = ?");
+          vals.push(JSON.stringify(newTags));
+        }
         vals.push(targetId, project);
         db.prepare(
           `UPDATE tasks SET ${sets.join(", ")} WHERE id = ? AND project = ?`
         ).run(...vals);
-        return ok({ updated: true, id: targetId, ...newText && { text: newText }, ...newPriority && { priority: newPriority } });
+        return ok({ updated: true, id: targetId, ...newText && { text: newText }, ...newPriority && { priority: newPriority }, ...newTags && { tags: newTags } });
       }
       if (action === "done" || action === "delete") {
         if (!id) return err(`'id' is required for action=${action}`);
@@ -543,11 +577,28 @@ Positions (1, 2, 3...) come from recall or task list results.`,
       }
       if (action === "list") {
         const rows = db.prepare(
-          "SELECT id, text, status, priority, created_at, done_at, tool FROM tasks WHERE project = ? ORDER BY created_at ASC"
+          "SELECT id, text, status, priority, tags, created_at, done_at FROM tasks WHERE project = ? ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 END, created_at ASC"
         ).all(project);
-        const pending = rows.filter((t) => t.status === "pending").map((t, i) => ({ position: i + 1, id: t.id, text: t.text, priority: t.priority }));
+        const parseTags = (t) => {
+          try {
+            return JSON.parse(t.tags || "[]");
+          } catch {
+            return [];
+          }
+        };
+        let pending = rows.filter((t) => t.status === "pending");
+        if (filter_tag) {
+          pending = pending.filter((t) => parseTags(t).includes(filter_tag));
+        }
+        const pendingMapped = pending.map((t, i) => ({
+          position: i + 1,
+          id: t.id,
+          text: t.text,
+          priority: t.priority,
+          ...parseTags(t).length > 0 && { tags: parseTags(t) }
+        }));
         const done = rows.filter((t) => t.status === "done").map((t) => ({ id: t.id, text: t.text, done_at: t.done_at }));
-        return ok({ project, pending, done });
+        return ok({ project, ...filter_tag && { filter_tag }, pending: pendingMapped, done });
       }
       return err("Invalid action");
     } catch (e) {
@@ -719,7 +770,24 @@ so the next session can resume from here.`,
       db.prepare(
         "UPDATE sessions SET summary = ?, files = ?, ended_at = ? WHERE id = ?"
       ).run(summary, JSON.stringify(files ?? []), now(), openSession.id);
-      return ok({ closed: true, project, tool, summary });
+      const pendingTasks = db.prepare(
+        "SELECT text, priority FROM tasks WHERE project = ? AND status = 'pending' ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 END LIMIT 5"
+      ).all(project);
+      const topMemories = db.prepare(
+        "SELECT key FROM memories WHERE project = ? AND key != '_snapshot' ORDER BY updated_at DESC LIMIT 8"
+      ).all(project);
+      const snapshotValue = [
+        `Last session (${tool}): ${summary}`,
+        files?.length ? `Files: ${files.slice(0, 5).join(", ")}` : null,
+        pendingTasks.length ? `Pending tasks: ${pendingTasks.map((t) => `[${t.priority}] ${t.text}`).join(" | ")}` : "No pending tasks",
+        topMemories.length ? `Key knowledge: ${topMemories.map((m) => m.key).join(", ")}` : null
+      ].filter(Boolean).join(" \u2014 ");
+      db.prepare(
+        `INSERT INTO memories (id, project, key, value, category, tool, updated_at)
+         VALUES (?, ?, '_snapshot', ?, 'note', ?, datetime('now'))
+         ON CONFLICT (project, key) DO UPDATE SET value = excluded.value, tool = excluded.tool, updated_at = excluded.updated_at`
+      ).run(uuid(), project, snapshotValue, tool);
+      return ok({ closed: true, project, tool, summary, snapshot_saved: true });
     } catch (e) {
       return err(errOf(e));
     }
@@ -809,6 +877,66 @@ Copy the result and paste it at the start of your conversation in the target too
       md += `---
 _ULTRON Hub v5_`;
       return text(md);
+    } catch (e) {
+      return err(errOf(e));
+    }
+  }
+);
+server.tool(
+  "clean",
+  `List and optionally delete stale memories \u2014 those not accessed in 45+ days.
+Actions:
+  - list    \u2014 show stale memories (default). Does not delete anything.
+  - archive \u2014 delete all stale memories for the project.
+  - delete  \u2014 delete a specific memory by key.
+
+Use token_budget() first to see how many stale memories exist.
+Stale memories are ones with last_accessed_at older than 45 days (or never accessed).`,
+  {
+    project: z.string().describe("Project name"),
+    action: z.enum(["list", "archive", "delete"]).optional().default("list").describe("'list' = show stale, 'archive' = delete all stale, 'delete' = delete specific key"),
+    key: z.string().optional().describe("Memory key to delete \u2014 only for action=delete"),
+    days: z.number().optional().default(45).describe("Stale threshold in days (default: 45)")
+  },
+  ({ project, action, key, days }) => {
+    try {
+      const threshold = days ?? 45;
+      const act = action ?? "list";
+      if (act === "delete") {
+        if (!key) return err("'key' is required for action=delete");
+        const result = db.prepare("DELETE FROM memories WHERE project = ? AND key = ?").run(project, key);
+        if (result.changes === 0) return err(`No memory found with key '${key}' in project '${project}'`);
+        return ok({ deleted: true, project, key });
+      }
+      const stale = db.prepare(
+        `SELECT key, category, value, last_accessed_at, created_at FROM memories
+         WHERE project = ?
+         AND key != '_snapshot'
+         AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-' || ? || ' days'))
+         ORDER BY last_accessed_at ASC NULLS FIRST`
+      ).all(project, threshold);
+      if (act === "archive") {
+        if (stale.length === 0) return ok({ archived: 0, message: `No stale memories found (threshold: ${threshold} days)` });
+        const ids = stale.map((m) => m.key);
+        const placeholders = ids.map(() => "?").join(",");
+        db.prepare(
+          `DELETE FROM memories WHERE project = ? AND key IN (${placeholders})`
+        ).run(project, ...ids);
+        return ok({ archived: stale.length, project, threshold_days: threshold, deleted_keys: ids });
+      }
+      return ok({
+        project,
+        threshold_days: threshold,
+        stale_count: stale.length,
+        stale_memories: stale.map((m) => ({
+          key: m.key,
+          category: m.category,
+          last_accessed: m.last_accessed_at ?? "never",
+          created_at: m.created_at,
+          preview: truncate(m.value ?? "", 100)
+        })),
+        hint: stale.length > 0 ? `Run clean(project, action='archive') to delete all, or clean(project, action='delete', key='...') for specific ones.` : `No stale memories \u2014 project is clean.`
+      });
     } catch (e) {
       return err(errOf(e));
     }

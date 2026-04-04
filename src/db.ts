@@ -1,4 +1,4 @@
-// ── ULTRON Hub v5 — SQLite Database ──────────────────────────────────────────
+// ── ULTRON Hub v6 — SQLite Database ──────────────────────────────────────────
 
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { mkdirSync } from "fs";
@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS memories (
   tool             TEXT,
   expires_at       TEXT,
   last_accessed_at TEXT,
+  related          TEXT DEFAULT '[]',
   created_at       TEXT DEFAULT (datetime('now')),
   updated_at       TEXT DEFAULT (datetime('now')),
   UNIQUE (project, key)
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS tasks (
               CHECK (status IN ('pending','done')),
   priority    TEXT NOT NULL DEFAULT 'medium'
               CHECK (priority IN ('high','medium','low')),
+  tags        TEXT DEFAULT '[]',
   tool        TEXT,
   created_at  TEXT DEFAULT (datetime('now')),
   done_at     TEXT
@@ -103,7 +105,7 @@ END;
 
 -- Schema versioning
 CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '5');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '6');
 `;
 
 // ── Initialize ──────────────────────────────────────────────────────────────
@@ -116,6 +118,11 @@ function initDb(): DatabaseType {
   db.pragma("foreign_keys = ON");
 
   db.exec(SCHEMA_SQL);
+
+  // ── Migrations for existing v5 databases ─────────────────────────────────
+  try { db.exec("ALTER TABLE memories ADD COLUMN related TEXT DEFAULT '[]'"); } catch { /* column exists */ }
+  try { db.exec("ALTER TABLE tasks ADD COLUMN tags TEXT DEFAULT '[]'"); } catch { /* column exists */ }
+  db.prepare("INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', '6')").run();
 
   return db;
 }

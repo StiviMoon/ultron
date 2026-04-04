@@ -1,6 +1,6 @@
 {
   "name": "ultron-hub",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "description": "Persistent developer memory for Claude Code, Cursor, and any MCP client. Local SQLite, zero config.",
   "type": "module",
   "bin": {

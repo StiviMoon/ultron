@@ -5,18 +5,88 @@
 
 ---
 
+## Un día real con ULTRON
+
+Así se ve trabajar con ULTRON desde que abres Claude Code hasta que lo cerrás.
+
+### 9:00 AM — Empezás el día
+
+```
+session_start("mi-proyecto", "claude-code")
+```
+
+ULTRON responde con:
+- **Última sesión:** "implementé el formulario de pago, falta el webhook"
+- **Tareas pendientes:** [high] integrar Stripe webhook | [medium] tests de integración
+- **Warnings activos:** "no mockear la BD en tests — prod falló por esto"
+- **Snapshot:** resumen comprimido del estado del proyecto
+
+La IA ya sabe dónde quedaste. Sin repetir contexto.
+
+### Durante el trabajo
+
+Cada vez que aprendés algo nuevo:
+
+```
+# Encontraste un bug importante
+remember("mi-proyecto", "stripe-idempotency",
+  "Siempre enviar idempotency key en Stripe — sin esto los webhooks duplican cobros",
+  "warning")
+
+# Definiste un patrón de arquitectura
+remember("mi-proyecto", "webhook-pattern",
+  "Todos los webhooks van a /api/webhooks/:provider — validan firma → enqueue job → 200",
+  "pattern",
+  related=["stripe-idempotency", "queue-config"])
+
+# Nueva tarea descubierta
+task("mi-proyecto", "add", "agregar retry logic al job processor", tags=["queue", "resilience"])
+
+# Decisión técnica tomada
+decision("mi-proyecto", "queue", "BullMQ + Redis",
+  "pg-boss descartado por falta de retry exponential nativo. BullMQ tiene mejor DX.")
+```
+
+### 1:00 PM — Necesitás buscar algo
+
+```
+search("mi-proyecto", "stripe")
+→ Encuentra: stripe-idempotency, webhook-pattern, decisión de BullMQ
+
+search("mi-proyecto", "auth", scope=["memories", "decisions"])
+→ Busca en memorias Y decisiones al mismo tiempo
+```
+
+### 6:00 PM — Cerrás la sesión
+
+```
+session_end("mi-proyecto", "claude-code",
+  "implementé webhook receiver + job processor con retry, falta el test e2e",
+  ["src/api/webhooks/stripe.ts", "src/jobs/processPayment.ts"])
+```
+
+ULTRON automáticamente:
+1. Guarda el resumen
+2. Crea un `_snapshot` con el estado actual del proyecto
+3. La próxima sesión empieza con ese snapshot cargado
+
+---
+
 ## Instalación
 
 ```bash
-# Desde GitHub
-npm install -g github:StiviMoon/ultron
+# Clonar y buildear
+git clone https://github.com/StiviMoon/ultron
+cd ultron
+npm install
+npm run build
 
 # Configurar en Claude Code (~/.mcp.json o .mcp.json del proyecto)
 {
   "mcpServers": {
     "ultron": {
       "command": "node",
-      "args": ["/ruta/a/ultron/dist/index.js"]
+      "args": ["/ruta/absoluta/ultron/dist/index.js"]
     }
   }
 }
@@ -34,7 +104,7 @@ Los datos se guardan en `~/.ultron/ultron.db` — se crea automáticamente al pr
 session_start("mi-proyecto", "claude-code")
 ```
 
-Devuelve todo lo que necesitás saber para retomar: última sesión, tareas pendientes, decisiones técnicas, y el conocimiento acumulado del proyecto.
+Devuelve todo lo que necesitás para retomar: warnings primero, luego tareas ordenadas por prioridad, decisiones recientes, y el snapshot de la última sesión.
 
 ### Durante el trabajo
 
@@ -42,8 +112,9 @@ Guardá conocimiento a medida que aparece. No esperes al final.
 
 ```
 remember("proyecto", "key", "valor", "categoria")
+remember("proyecto", "key", "valor", "pattern", related=["key1", "key2"])
 decision("proyecto", "tema", "elección", "por qué")
-task("proyecto", "add", "algo que hacer")
+task("proyecto", "add", "algo que hacer", tags=["area"])
 note("proyecto", "observación rápida")
 ```
 
@@ -61,17 +132,17 @@ Elegir la correcta hace que `generate_rules` funcione mejor.
 
 | Categoría | Cuándo usar | Ejemplo |
 |---|---|---|
-| `fact` | Datos concretos del proyecto | Stack, URLs, versiones, credenciales (nunca secrets) |
-| `pattern` | Cómo se hace algo aquí | Arquitectura de módulos, convenciones de nombres |
+| `fact` | Datos concretos del proyecto | Stack, URLs, versiones |
+| `pattern` | Cómo se hace algo aquí | Arquitectura de módulos, convenciones |
 | `preference` | Cómo preferís trabajar | Estilo de código, herramientas elegidas |
 | `warning` | Qué evitar — aprendiste de un error | "No mockear la BD en tests de integración" |
 | `note` | Observación rápida | Idea que surgió, algo a revisar después |
 
-Las más valiosas son `warning` y `pattern` — son las que se convierten en reglas CLAUDE.md.
+Las más valiosas son `warning` y `pattern` — cargan primero en `session_start` y se convierten en reglas CLAUDE.md con `generate_rules`.
 
 ---
 
-## Los 16 tools — cuándo usar cada uno
+## Los 18 tools — cuándo usar cada uno
 
 ### Sesión
 
@@ -88,6 +159,7 @@ Las más valiosas son `warning` y `pattern` — son las que se convierten en reg
 | `note` | Pensamiento rápido, no hace falta estructurarlo |
 | `forget` | Cuando una memoria quedó desactualizada |
 | `recall` | Para cargar contexto manualmente (session_start ya lo hace) |
+| `clean` | Para limpiar memorias que nadie consultó en 45+ días |
 
 ### Búsqueda
 
@@ -100,8 +172,10 @@ Las más valiosas son `warning` y `pattern` — son las que se convierten en reg
 | Tool | Cuándo |
 |---|---|
 | `task add` | Al descubrir algo que falta hacer |
-| `task done` | Al completar — usar posición (1, 2, 3) es más fácil que el UUID |
+| `task add` con tags | Cuando querés agrupar tareas por área |
+| `task done` | Al completar |
 | `task list` | Para ver todo el backlog |
+| `task list` con filter_tag | Para ver solo las tareas de un área |
 
 ### Decisiones
 
@@ -114,8 +188,8 @@ Las más valiosas son `warning` y `pattern` — son las que se convierten en reg
 
 | Tool | Cuándo |
 |---|---|
-| `generate_rules` | Cuando querés actualizar el CLAUDE.md del proyecto con lo aprendido |
-| `token_budget` | Si el recall empieza a sentirse pesado — para diagnosticar |
+| `generate_rules` | Cuando querés actualizar el CLAUDE.md con lo aprendido |
+| `token_budget` | Si el recall empieza a sentirse pesado |
 | `handoff` | Para llevar contexto a Claude.ai o ChatGPT sin MCP |
 
 ### Sync
@@ -127,45 +201,95 @@ Las más valiosas son `warning` y `pattern` — son las que se convierten en reg
 
 ---
 
-## Optimización de tokens
+## Grafo de conocimiento con `related`
 
-ULTRON puede consumir muchos tokens si el proyecto creció mucho. Usá estos controles:
+Las memorias pueden estar vinculadas entre sí. Esto ayuda a navegar conceptos relacionados.
+
+```
+remember("proyecto", "auth-flow",
+  "Login → JWT → refresh token cada 15min",
+  "pattern",
+  related=["jwt-config", "refresh-token-warning"])
+
+remember("proyecto", "refresh-token-warning",
+  "Nunca guardar el refresh token en localStorage — usar httpOnly cookie",
+  "warning",
+  related=["auth-flow"])
+```
+
+Cuando `recall` devuelve `auth-flow`, también muestra las keys relacionadas — podés pedirlas con `search` si necesitás los valores.
+
+---
+
+## Tags en tareas
+
+```
+task("proyecto", "add", "migrar schema de pagos", tags=["db", "payments", "migration"])
+task("proyecto", "add", "actualizar endpoints de Stripe", tags=["payments", "api"])
+task("proyecto", "add", "escribir tests e2e de auth", tags=["auth", "testing"])
+
+# Ver solo las de payments:
+task("proyecto", "list", filter_tag="payments")
+→ migrar schema de pagos
+→ actualizar endpoints de Stripe
+```
+
+---
+
+## Snapshot automático
+
+Cada `session_end` guarda un `_snapshot` con el estado del proyecto:
+
+```
+_snapshot: Last session (claude-code): implementé webhook receiver — Files: src/webhooks/stripe.ts
+           Pending tasks: [high] test e2e | [medium] retry logic | [low] documentar API
+           Key knowledge: stripe-idempotency, webhook-pattern, queue-config, auth-flow
+```
+
+La próxima vez que abras el proyecto, este snapshot es lo primero que carga. No necesitás leer 30 memorias para saber dónde estás.
+
+---
+
+## Optimización de tokens
 
 ```
 # Solo keys, sin valores — ahorra ~80% tokens en memories
 session_start("proyecto", "claude-code", slim=true)
 
 # Solo cargar lo que necesitás
-recall("proyecto", fields=["tasks"])          # solo tareas
-recall("proyecto", fields=["memories"])       # solo conocimiento
-recall("proyecto", fields=["tasks", "decisions"])
+recall("proyecto", fields=["tasks"])
+recall("proyecto", fields=["memories", "decisions"])
 
 # Verificar cuánto pesa el proyecto
 token_budget("proyecto")
-→ Muestra breakdown por sección + sugerencias si es demasiado
+→ Muestra breakdown por sección + cantidad de memorias stale
+
+# Limpiar memorias no consultadas en 45+ días
+clean("proyecto")                      # ver qué hay
+clean("proyecto", action="archive")    # borrar todas
+clean("proyecto", action="delete", key="old-key")  # borrar una
 ```
 
 ### Regla práctica
-- Proyectos nuevos o con pocas memories: `session_start` sin parámetros
-- Proyectos grandes (>20 memories): `session_start(slim=true)` y cargás los valores que necesitás con `search` o `recall`
+- Proyectos nuevos o pequeños: `session_start` normal
+- Proyectos grandes (>20 memories): `session_start(slim=true)` + `search` para valores específicos
+- Proyectos muy viejos: `clean` primero, luego `session_start`
 
 ---
 
 ## Generar reglas CLAUDE.md
 
-Esta es la feature más poderosa: tu experiencia acumulada se convierte en reglas de trabajo.
-
 ```
 generate_rules("proyecto")
 ```
 
-Toma todas las memories de tipo `warning`, `pattern` y `preference` y las formatea como reglas para pegar en el CLAUDE.md del proyecto.
+Convierte todas las memories `warning`, `pattern` y `preference` en reglas para tu CLAUDE.md.
 
 **Flujo recomendado:**
 1. Durante semanas, guardás warnings y patterns mientras trabajás
 2. Cada tanto corrés `generate_rules`
 3. Pegás el resultado en `CLAUDE.md` del proyecto
-4. La próxima sesión, la IA ya tiene esas reglas sin consumir tokens de memoria
+4. La próxima sesión, la IA tiene esas reglas sin consumir tokens de memoria
 
 ---
 
@@ -174,7 +298,6 @@ Toma todas las memories de tipo `warning`, `pattern` y `preference` y las format
 ```
 # Máquina A — exportar
 export_project("mi-proyecto")
-# Copiás el JSON que devuelve
 
 # Máquina B — importar
 import_project('[el json]', "merge")
@@ -190,7 +313,7 @@ import_project('[el json]', "merge")
 # Buscar en memories (FTS5 — full-text, rápido y relevante)
 search("proyecto", "stripe webhook")
 
-# Buscar también en decisiones y tareas
+# Buscar en decisiones y tareas también
 search("proyecto", "auth", scope=["memories", "decisions", "tasks"])
 
 # Buscar en TODOS los proyectos
@@ -202,16 +325,16 @@ search("mj", "payment", projects=["mj", "vendly"])
 
 ---
 
-## Claves para decisions bien guardadas
+## Decisiones bien guardadas
 
 Una buena decisión tiene contexto suficiente para entenderse en 6 meses:
 
 ```
 decision(
   "proyecto",
-  "base-de-datos",          # tema: corto y searchable
-  "PostgreSQL + Prisma",    # qué elegiste
-  "SQLite descartado por falta de soporte multiusuario. MongoDB descartado por schema flexible innecesario. PostgreSQL tiene el mejor soporte de Prisma y tipo DATE nativo para las queries de reportes."
+  "base-de-datos",
+  "PostgreSQL + Prisma",
+  "SQLite descartado por falta de soporte multiusuario. MongoDB descartado por schema flexible innecesario. PostgreSQL tiene el mejor soporte de Prisma y tipo DATE nativo."
 )
 ```
 
@@ -219,16 +342,14 @@ decision(
 
 ## Tareas — posiciones vs UUIDs
 
-Las posiciones son dinámicas (cambian cuando marcás una tarea como done). Los UUIDs son estáticos.
-
 ```
-# Correcto para una tarea a la vez:
+# Una tarea a la vez (seguro):
 task("proyecto", "done", id="1")   # posición 1
 
-# Correcto para múltiples en paralelo:
-task("proyecto", "done", id="b87d...")  # UUID
-task("proyecto", "done", id="fc1d...")  # UUID
-# ⚠️ No uses posiciones en paralelo — pueden shiftear
+# Múltiples en paralelo (usar UUID):
+task("proyecto", "done", id="b87d-...")
+task("proyecto", "done", id="fc1d-...")
+# No uses posiciones en paralelo — pueden shiftear
 ```
 
 ---
@@ -239,7 +360,7 @@ task("proyecto", "done", id="fc1d...")  # UUID
 ~/.ultron/ultron.db   ← SQLite, un solo archivo
 
 # Custom location:
-ULTRON_DB_PATH=/otro/path/ultron.db
+ULTRON_DB_PATH=/otro/path/ultron.db node dist/index.js
 
 # Backup:
 cp ~/.ultron/ultron.db ~/backups/ultron-$(date +%Y%m%d).db
@@ -247,16 +368,4 @@ cp ~/.ultron/ultron.db ~/backups/ultron-$(date +%Y%m%d).db
 
 ---
 
-## Proyectos disponibles
-
-```
-projects()
-→ Lista todos los proyectos con:
-   - última sesión (herramienta + resumen)
-   - tareas pendientes
-   - cantidad de memories y decisiones
-```
-
----
-
-*ULTRON Hub v5 — https://github.com/StiviMoon/ultron*
+*ULTRON Hub v6 — https://github.com/StiviMoon/ultron*
