@@ -14,8 +14,7 @@
   ],
   "scripts": {
     "build": "tsup",
-    "dev": "tsx src/index.ts",
-    "prepare": "npm run build"
+    "dev": "tsx src/index.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
@@ -46,7 +45,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/stevenvo780/ultron-hub"
+    "url": "https://github.com/StiviMoon/ultron"
   },
   "author": "Steven Villarreal"
 }
