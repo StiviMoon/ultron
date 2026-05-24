@@ -1,4 +1,4 @@
-// ── ULTRON Hub v6 — SQLite Database ──────────────────────────────────────────
+// ── ULTRON Hub v7 — SQLite Database ──────────────────────────────────────────
 
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { mkdirSync } from "fs";
@@ -19,10 +19,12 @@ CREATE TABLE IF NOT EXISTS memories (
   key              TEXT NOT NULL,
   value            TEXT NOT NULL,
   category         TEXT NOT NULL DEFAULT 'fact'
-                   CHECK (category IN ('fact','pattern','preference','warning','note')),
+                   CHECK (category IN ('fact','pattern','preference','warning','note','rule')),
   tool             TEXT,
   expires_at       TEXT,
   last_accessed_at TEXT,
+  access_count     INTEGER NOT NULL DEFAULT 0,
+  importance       INTEGER NOT NULL DEFAULT 5 CHECK (importance BETWEEN 1 AND 10),
   related          TEXT DEFAULT '[]',
   created_at       TEXT DEFAULT (datetime('now')),
   updated_at       TEXT DEFAULT (datetime('now')),
@@ -72,6 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_project  ON memories  (project);
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories  (project, category);
 CREATE INDEX IF NOT EXISTS idx_memories_expires  ON memories  (project, expires_at)
   WHERE expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_score    ON memories  (project, access_count DESC, importance DESC, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_project  ON sessions  (project, tool);
 CREATE INDEX IF NOT EXISTS idx_sessions_ended    ON sessions  (project, ended_at DESC);
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions (project);
@@ -119,10 +122,39 @@ function initDb(): DatabaseType {
 
   db.exec(SCHEMA_SQL);
 
-  // ── Migrations for existing v5 databases ─────────────────────────────────
-  try { db.exec("ALTER TABLE memories ADD COLUMN related TEXT DEFAULT '[]'"); } catch { /* column exists */ }
-  try { db.exec("ALTER TABLE tasks ADD COLUMN tags TEXT DEFAULT '[]'"); } catch { /* column exists */ }
-  db.prepare("INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', '6')").run();
+  // ── Migrations ────────────────────────────────────────────────────────────
+  try { db.exec("ALTER TABLE memories ADD COLUMN related TEXT DEFAULT '[]'"); } catch { /* exists */ }
+  try { db.exec("ALTER TABLE tasks ADD COLUMN tags TEXT DEFAULT '[]'"); } catch { /* exists */ }
+  try { db.exec("ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
+  try { db.exec("ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 5"); } catch { /* exists */ }
+  // Migrate category CHECK: SQLite can't ALTER CHECK, so we recreate the table if needed
+  try {
+    const cats = db.prepare("SELECT DISTINCT category FROM memories WHERE category NOT IN ('fact','pattern','preference','warning','note','rule')").all();
+    if (cats.length === 0) {
+      // Safe to recreate with new CHECK (no invalid categories)
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS memories_v7 (
+          id TEXT PRIMARY KEY, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+          category TEXT NOT NULL DEFAULT 'fact'
+            CHECK (category IN ('fact','pattern','preference','warning','note','rule')),
+          tool TEXT, expires_at TEXT, last_accessed_at TEXT,
+          access_count INTEGER NOT NULL DEFAULT 0, importance INTEGER NOT NULL DEFAULT 5 CHECK (importance BETWEEN 1 AND 10),
+          related TEXT DEFAULT '[]', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+          UNIQUE (project, key)
+        );
+      `);
+      const existing = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memories_v7'").get() as any;
+      if (existing) {
+        db.exec("INSERT OR IGNORE INTO memories_v7 SELECT id,project,key,value,category,tool,expires_at,last_accessed_at,COALESCE(access_count,0),COALESCE(importance,5),related,created_at,updated_at FROM memories");
+        db.exec("DROP TABLE memories");
+        db.exec("ALTER TABLE memories_v7 RENAME TO memories");
+        db.exec("CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project)");
+        db.exec("CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(project,category)");
+        db.exec("CREATE INDEX IF NOT EXISTS idx_memories_score ON memories(project,access_count DESC,importance DESC,updated_at DESC)");
+      }
+    }
+  } catch { /* migration failed silently — keep running */ }
+  db.prepare("INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', '7')").run();
 
   return db;
 }

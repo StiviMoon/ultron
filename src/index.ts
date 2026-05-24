@@ -1,24 +1,26 @@
 /**
- * ULTRON Hub — MCP Server v6
+ * ULTRON Hub — MCP Server v7
  *
  * Persistent developer memory for Claude Code, Cursor, and any MCP client.
  * Local SQLite, zero config. Install: git clone + npm install + npm run build
  *
- * Tools (18):
+ * Tools (20):
  *   recall           — load full project context; supports slim mode and field filters
- *   remember         — save persistent key-value knowledge + expires_at + related links
+ *   remember         — save persistent key-value knowledge + expires_at + related links + importance
  *   note             — quick thought (auto-generated key from text)
  *   forget           — delete a memory by key
  *   search           — full-text search across memories, decisions, tasks; multi-project
  *   clean            — list/archive stale memories (not accessed in 45+ days)
+ *   health           — NEW: project integrity diagnostics (stale, expired, snapshot age, bloat)
+ *   compress         — NEW: collapse related memories into a single structured memory
  *   task             — backlog management (add | update | done | list | delete) + tags
  *   decision         — immutable technical decision log
  *   list_decisions   — full decision history with pagination
  *   projects         — list all projects with stats
- *   session_start    — start session + auto recall (warnings/high-priority first)
+ *   session_start    — start session + relevance-ranked recall + diff mode + auto-purge expired
  *   session_end      — close session + auto-snapshot memory
  *   handoff          — generate markdown context for Claude.ai / ChatGPT
- *   generate_rules   — convert warning/pattern memories into CLAUDE.md rules
+ *   generate_rules   — convert warning/pattern/rule memories into CLAUDE.md rules
  *   token_budget     — estimate token consumption per project
  *   export_project   — export project data as JSON for sync between machines
  *   import_project   — import JSON data with merge or replace strategy
@@ -37,13 +39,32 @@ interface FetchContextOptions {
   slim?: boolean;
   maxValueLength?: number;
   fields?: ContextField[];
+  /** If provided, enables diff mode: only return what changed since this ISO timestamp */
+  since?: string;
+}
+
+// ── Relevance score formula ─────────────────────────────────────────────────
+// score = (access_count * 0.4) + (importance * 0.3) + (recency_score * 0.3)
+// recency_score: days since update, clamped to [0,1] (newer = higher)
+// category bonus: rule=+100, warning=+20, pattern=+10 (always surface these first)
+const CATEGORY_BONUS: Record<string, number> = {
+  rule: 100, warning: 20, pattern: 10, preference: 5, fact: 0, note: -5,
+};
+
+// ── Purge expired memories ──────────────────────────────────────────────────
+function purgeExpired(project: string): number {
+  const result = db.prepare(
+    `DELETE FROM memories WHERE project = ? AND expires_at IS NOT NULL AND expires_at < datetime('now')`
+  ).run(project);
+  return result.changes;
 }
 
 // ── Shared context loader ───────────────────────────────────────────────────
 function fetchProjectContext(project: string, options: FetchContextOptions = {}) {
-  const { slim = false, maxValueLength = 1500, fields } = options;
+  const { slim = false, maxValueLength = 1500, fields, since } = options;
   const loadAll = !fields || fields.length === 0;
   const load = (f: ContextField) => loadAll || (fields?.includes(f) ?? false);
+  const nowMs = Date.now();
 
   // Sessions
   const sessions = load("sessions")
@@ -52,13 +73,26 @@ function fetchProjectContext(project: string, options: FetchContextOptions = {})
       ).all(project) as any[]
     : null;
 
-  // Memories — warnings and patterns first, then by recency
+  // Rules: always loaded first, full values, regardless of slim mode
+  const rules = db.prepare(
+    `SELECT id, key, value, importance FROM memories
+     WHERE project = ? AND category = 'rule'
+     ORDER BY importance DESC, updated_at DESC`
+  ).all(project) as any[];
+
+  // Memories — relevance-scored, exclude rules (handled separately), exclude expired
   const memories = load("memories")
     ? db.prepare(
-        `SELECT * FROM memories WHERE project = ?
-         ORDER BY CASE category WHEN 'warning' THEN 0 WHEN 'pattern' THEN 1 ELSE 2 END,
-                  updated_at DESC
-         LIMIT 30`
+        `SELECT *,
+          (access_count * 0.4 + importance * 0.3 +
+           MAX(0, 1.0 - CAST((julianday('now') - julianday(updated_at)) AS REAL) / 90.0) * 0.3) AS relevance_score
+         FROM memories
+         WHERE project = ? AND category != 'rule'
+           AND (expires_at IS NULL OR expires_at > datetime('now'))
+         ORDER BY
+           CASE category WHEN 'warning' THEN 20 WHEN 'pattern' THEN 10 WHEN 'preference' THEN 5 ELSE 0 END DESC,
+           relevance_score DESC
+         LIMIT 20`
       ).all(project) as any[]
     : null;
 
@@ -78,42 +112,59 @@ function fetchProjectContext(project: string, options: FetchContextOptions = {})
       ).all(project) as any[]
     : null;
 
-  // Update last_accessed_at for returned memories
-  if (memories && memories.length > 0) {
-    const ids = memories.map((m: any) => m.id);
+  // Update last_accessed_at + access_count for returned memories
+  const allAccessed = [...(memories ?? []), ...rules];
+  if (allAccessed.length > 0) {
+    const ids = allAccessed.map((m: any) => m.id);
     const placeholders = ids.map(() => "?").join(",");
     db.prepare(
-      `UPDATE memories SET last_accessed_at = datetime('now') WHERE id IN (${placeholders})`
+      `UPDATE memories SET last_accessed_at = datetime('now'), access_count = access_count + 1
+       WHERE id IN (${placeholders})`
     ).run(...ids);
   }
 
   const lastSession = sessions?.[0] ?? null;
-  const nowMs = Date.now();
+
+  // Diff mode: if 'since' provided, filter to only changed items
+  const isDiff = !!since;
+  const filteredMemories = isDiff && memories
+    ? memories.filter((m: any) => m.updated_at > since!)
+    : memories;
+  const filteredTasks = isDiff && tasks
+    ? tasks.filter((t: any) => t.created_at > since!)
+    : tasks;
+  const filteredDecisions = isDiff && decisions
+    ? decisions.filter((d: any) => d.created_at > since!)
+    : decisions;
 
   // Process memories
-  const processedMemories = memories
-    ? memories.map((m: any) => {
-        const expired = m.expires_at && new Date(m.expires_at).getTime() < nowMs;
-        if (slim) {
-          return { key: m.key, category: m.category, ...(expired && { expired: true }) };
-        }
-        const relatedKeys = (() => { try { return JSON.parse(m.related || "[]"); } catch { return []; } })();
-        return {
-          key:      m.key,
-          value:    truncate(m.value ?? "", maxValueLength),
-          category: m.category,
-          ...(expired && { expired: true }),
-          ...(m.expires_at && !expired && { expires_at: m.expires_at }),
-          ...(m.value?.length > maxValueLength && { truncated: true }),
-          ...(relatedKeys.length > 0 && { related: relatedKeys }),
-        };
-      })
-    : null;
+  const processMemory = (m: any) => {
+    if (slim) {
+      return { key: m.key, category: m.category, importance: m.importance ?? 5 };
+    }
+    const relatedKeys = (() => { try { return JSON.parse(m.related || "[]"); } catch { return []; } })();
+    return {
+      key:        m.key,
+      value:      truncate(m.value ?? "", maxValueLength),
+      category:   m.category,
+      importance: m.importance ?? 5,
+      ...(m.expires_at && { expires_at: m.expires_at }),
+      ...(m.value?.length > maxValueLength && { truncated: true }),
+      ...(relatedKeys.length > 0 && { related: relatedKeys }),
+    };
+  };
+
+  const processedRules = rules.map((m: any) => ({
+    key: m.key, value: m.value, importance: m.importance ?? 5,
+  }));
+  const processedMemories = filteredMemories ? filteredMemories.map(processMemory) : null;
 
   return {
     project,
     retrieved_at: now(),
+    ...(isDiff && { diff_mode: true, since }),
     ...(slim && { note: "slim mode — memories without values. Use full recall if you need values." }),
+    ...(rules.length > 0 && { rules: processedRules }),
     last_session: lastSession
       ? {
           tool:     lastSession.tool,
@@ -130,16 +181,19 @@ function fetchProjectContext(project: string, options: FetchContextOptions = {})
         }))
       : undefined,
     memories: processedMemories ?? undefined,
-    pending_tasks: tasks
-      ? tasks.map((t: any, i: number) => ({
+    pending_tasks: filteredTasks
+      ? filteredTasks.map((t: any, i: number) => ({
           position: i + 1,
           id:       t.id,
           text:     t.text,
           priority: t.priority ?? "medium",
+          ...((() => { try { return JSON.parse(t.tags || "[]"); } catch { return []; } })().length > 0 && {
+            tags: (() => { try { return JSON.parse(t.tags || "[]"); } catch { return []; } })()
+          }),
         }))
       : undefined,
-    recent_decisions: decisions
-      ? decisions.map((d: any) => ({
+    recent_decisions: filteredDecisions
+      ? filteredDecisions.map((d: any) => ({
           topic:  d.topic,
           choice: d.choice,
           reason: truncate(d.reason ?? "", 300),
@@ -151,7 +205,7 @@ function fetchProjectContext(project: string, options: FetchContextOptions = {})
 // ── MCP Server ──────────────────────────────────────────────────────────────
 const server = new McpServer({
   name:    "ultron-hub",
-  version: "6.0.0",
+  version: "7.0.0",
 });
 
 // ── TOOL: recall ────────────────────────────────────────────────────────────
@@ -187,25 +241,30 @@ server.tool(
   `Save or update persistent key-value knowledge for a project.
 If the key already exists, it upserts (updates the value).
 Categories:
+  - rule        — ALWAYS injected first in session_start, regardless of slim mode. Use for non-negotiable project rules.
   - fact        — concrete data: stack, URLs, versions
   - pattern     — code or architecture patterns to follow
   - preference  — team or developer preferences
-  - warning     — things to avoid, known bugs, gotchas
-  - note        — free-form observations`,
+  - warning     — things to avoid, known bugs, gotchas (loaded with high priority)
+  - note        — free-form observations
+
+importance (1-10, default 5): controls relevance ranking. Use 8-10 for critical knowledge, 1-3 for ephemeral notes.`,
   {
     project:    z.string().describe("Project name"),
     key:        z.string().describe("Unique identifier. Ex: 'stack-frontend', 'api-base-url'"),
     value:      z.string().describe("The knowledge to save"),
-    category:   z.enum(["fact", "pattern", "preference", "warning", "note"])
+    category:   z.enum(["fact", "pattern", "preference", "warning", "note", "rule"])
                  .default("fact")
-                 .describe("Type of knowledge"),
+                 .describe("Type of knowledge. 'rule' = always injected first, non-negotiable."),
+    importance: z.number().min(1).max(10).optional()
+                 .describe("Relevance score 1-10 (default: 5). 8-10 for critical, 1-3 for ephemeral."),
     expires_at: z.string().optional()
-                 .describe("Optional ISO expiration date. Ex: '2026-06-01'. After this date the memory shows as [EXPIRED]."),
+                 .describe("Optional ISO expiration date. Ex: '2026-06-01'. Auto-purged on session_start."),
     related:    z.array(z.string()).optional()
                  .describe("Keys of related memories. Ex: ['api-pattern', 'auth-flow']. Creates a knowledge graph."),
     tool:       z.string().optional().describe("Tool saving this. Ex: 'claude-code', 'cursor'"),
   },
-  ({ project, key, value, category, expires_at, related, tool }) => {
+  ({ project, key, value, category, importance, expires_at, related, tool }) => {
     try {
       if (value.length > 10000) {
         return err("Value exceeds 10,000 character limit. Save only essential information.");
@@ -231,23 +290,32 @@ Categories:
         );
       }
 
+      // Auto-importance defaults by category
+      const autoImportance = importance ?? (
+        category === "rule" ? 9 :
+        category === "warning" ? 8 :
+        category === "pattern" ? 7 :
+        category === "preference" ? 6 : 5
+      );
+
       const id = uuid();
       const relatedJson = JSON.stringify(related ?? []);
       db.prepare(
-        `INSERT INTO memories (id, project, key, value, category, tool, updated_at, expires_at, related)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO memories (id, project, key, value, category, importance, tool, updated_at, expires_at, related)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (project, key) DO UPDATE SET
            value = excluded.value,
            category = excluded.category,
+           importance = excluded.importance,
            tool = excluded.tool,
            updated_at = excluded.updated_at,
            expires_at = excluded.expires_at,
            related = excluded.related`
-      ).run(id, project, key, value, category, tool ?? "claude-code", now(), expires_at ?? null, relatedJson);
+      ).run(id, project, key, value, category, autoImportance, tool ?? "claude-code", now(), expires_at ?? null, relatedJson);
 
       return ok({
         saved: true,
-        project, key, category, value,
+        project, key, category, importance: autoImportance, value,
         ...(expires_at && { expires_at }),
         ...(related && related.length > 0 && { related }),
         ...(warnings.length > 0 && { warnings }),
@@ -699,37 +767,51 @@ server.tool(
 Equivalent to session_start + recall in one step.
 Call at the beginning of work — returns everything needed to resume.
 
-Optional parameters for token control:
-  - slim: true = memories without values (keys only). Useful when the project has many memories.
-  - fields: load only specific sections ["sessions", "memories", "tasks", "decisions"]`,
+v7 improvements:
+  - Rules (category='rule') are ALWAYS injected first, full values, never truncated
+  - Memories ranked by relevance score (access_count + importance + recency), not just date
+  - Expired memories are auto-purged before loading context
+  - diff_since: only return what changed since a given ISO timestamp (saves tokens for re-opens)
+
+Token control:
+  - slim: true = memories without values (keys only). ~80% token reduction.
+  - fields: load only specific sections ["sessions", "memories", "tasks", "decisions"]
+  - diff_since: ISO timestamp — only return changed items since then`,
   {
-    project: z.string().describe("Project name"),
-    tool:    z.string().describe("Current tool. Ex: 'claude-code', 'cursor'"),
-    slim:    z.boolean().optional().describe("If true, memories return only key+category (no values)."),
-    fields:  z.array(z.enum(["sessions", "memories", "tasks", "decisions"])).optional()
-              .describe("Only load these sections. Omit to load everything."),
+    project:    z.string().describe("Project name"),
+    tool:       z.string().describe("Current tool. Ex: 'claude-code', 'cursor'"),
+    slim:       z.boolean().optional().describe("If true, memories return only key+category+importance (no values)."),
+    fields:     z.array(z.enum(["sessions", "memories", "tasks", "decisions"])).optional()
+                 .describe("Only load these sections. Omit to load everything."),
+    diff_since: z.string().optional()
+                 .describe("ISO timestamp. Only return memories/tasks/decisions updated after this. Use for quick re-open without full reload."),
   },
-  ({ project, tool, slim, fields }) => {
+  ({ project, tool, slim, fields, diff_since }) => {
     try {
-      // Auto-close stale sessions (open >2h)
+      // 1. Auto-purge expired memories
+      const purged = purgeExpired(project);
+
+      // 2. Auto-close stale sessions (open >2h) from any tool
       const twoHoursAgo = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
-      db.prepare(
+      const staleClosed = db.prepare(
         `UPDATE sessions SET ended_at = ?, summary = 'Auto-closed — stale session (>2h without session_end)'
          WHERE project = ? AND ended_at IS NULL AND started_at < ?`
-      ).run(now(), project, twoHoursAgo);
+      ).run(now(), project, twoHoursAgo).changes;
 
-      // Create new session
+      // 3. Create new session
       const sessionId = uuid();
       db.prepare(
         "INSERT INTO sessions (id, project, tool) VALUES (?, ?, ?)"
       ).run(sessionId, project, tool);
 
-      // Load context
-      const context = fetchProjectContext(project, { slim, fields });
+      // 4. Load context (with optional diff mode)
+      const context = fetchProjectContext(project, { slim, fields, since: diff_since });
 
       return ok({
         session_id: sessionId,
         started_at: now(),
+        ...(purged > 0 && { auto_purged_expired: purged }),
+        ...(staleClosed > 0 && { auto_closed_stale_sessions: staleClosed }),
         ...context,
       });
     } catch (e: unknown) {
@@ -952,26 +1034,30 @@ Stale memories are ones with last_accessed_at older than 45 days (or never acces
 // ── TOOL: generate_rules ────────────────────────────────────────────────────
 server.tool(
   "generate_rules",
-  `Convert project memories (warnings, patterns, preferences) into CLAUDE.md-compatible rules.
+  `Convert project memories (rules, warnings, patterns, preferences) into CLAUDE.md-compatible rules.
 Returns markdown ready to paste into your project's CLAUDE.md file.
-The rules are extracted from real experience stored in ULTRON — specific to YOUR failure modes, not generic advice.`,
+The rules are extracted from real experience stored in ULTRON — specific to YOUR failure modes, not generic advice.
+
+Category 'rule' is now a first-class category — always listed first, sorted by importance.`,
   {
     project:    z.string().describe("Project name"),
-    categories: z.array(z.enum(["warning", "pattern", "preference", "fact"]))
+    categories: z.array(z.enum(["rule", "warning", "pattern", "preference", "fact"]))
                  .optional()
-                 .describe("Categories to include. Default: ['warning', 'pattern', 'preference']"),
+                 .describe("Categories to include. Default: ['rule', 'warning', 'pattern', 'preference']"),
   },
   ({ project, categories }) => {
     try {
       const cats = categories && categories.length > 0
         ? categories
-        : ["warning", "pattern", "preference"];
+        : ["rule", "warning", "pattern", "preference"];
 
       const placeholders = cats.map(() => "?").join(",");
       const memories = db.prepare(
-        `SELECT key, value, category FROM memories
+        `SELECT key, value, category, importance FROM memories
          WHERE project = ? AND category IN (${placeholders})
-         ORDER BY category, key`
+           AND (expires_at IS NULL OR expires_at > datetime('now'))
+         ORDER BY CASE category WHEN 'rule' THEN 0 WHEN 'warning' THEN 1 WHEN 'pattern' THEN 2 WHEN 'preference' THEN 3 ELSE 4 END,
+                  importance DESC, key`
       ).all(project, ...cats) as any[];
 
       if (memories.length === 0) {
@@ -986,7 +1072,16 @@ The rules are extracted from real experience stored in ULTRON — specific to YO
       }
 
       let md = `# Project Rules: ${project}\n`;
-      md += `# Generated by ULTRON Hub — paste into your project's CLAUDE.md\n\n`;
+      md += `# Generated by ULTRON Hub v7 — paste into your project's CLAUDE.md\n\n`;
+
+      if (grouped.rule) {
+        md += `## Non-negotiable Rules\n`;
+        md += `<!-- Always active — injected first in every session -->\n\n`;
+        for (const m of grouped.rule) {
+          md += `- ${m.value}\n`;
+        }
+        md += "\n";
+      }
 
       if (grouped.warning) {
         md += `## Avoid\n`;
@@ -1025,7 +1120,7 @@ The rules are extracted from real experience stored in ULTRON — specific to YO
       }
 
       md += `---\n`;
-      md += `_Generated by ULTRON Hub v5 on ${new Date().toISOString().split("T")[0]}_\n`;
+      md += `_Generated by ULTRON Hub v7 on ${new Date().toISOString().split("T")[0]}_\n`;
 
       return text(md);
     } catch (e: unknown) {
@@ -1078,16 +1173,23 @@ Suggests optimizations if token usage is high.`,
 
       const suggestions: string[] = [];
       if (total > 5000 && memories.length > 15) {
-        suggestions.push("Use recall with slim:true to reduce memory tokens by ~80%");
+        suggestions.push("Use session_start with slim:true to reduce memory tokens by ~80%");
       }
       if (tasks.length > 20) {
-        suggestions.push("Mark completed tasks as done to reduce task count");
+        suggestions.push("Mark completed tasks as done — task list is large");
       }
       if (staleCount > 5) {
-        suggestions.push(`${staleCount} memories not accessed in 45+ days — consider cleaning with forget()`);
+        suggestions.push(`${staleCount} memories not accessed in 45+ days — run clean(project, action='archive') to purge`);
       }
       if (total > 8000) {
         suggestions.push("Use fields:['memories','tasks'] to skip sessions/decisions in recall");
+        suggestions.push("Run health(project) for a full integrity report and compression opportunities");
+      }
+      const rulesCount = (db.prepare(
+        `SELECT COUNT(*) as c FROM memories WHERE project = ? AND category = 'rule'`
+      ).get(project) as any)?.c ?? 0;
+      if (rulesCount === 0 && memories.length > 10) {
+        suggestions.push("No 'rule' memories defined — consider promoting key warnings/patterns to category='rule' for guaranteed injection");
       }
 
       return ok({
@@ -1097,6 +1199,201 @@ Suggests optimizations if token usage is high.`,
         stale_memories: staleCount,
         ...(suggestions.length > 0 && { suggestions }),
         ...(total > 8000 && { warning: `High token usage (${total} estimated). Consider optimizations above.` }),
+      });
+    } catch (e: unknown) {
+      return err(errOf(e));
+    }
+  }
+);
+
+// ── TOOL: health ────────────────────────────────────────────────────────────
+server.tool(
+  "health",
+  `Project integrity diagnostics — proactive analysis of memory quality and token efficiency.
+Returns actionable warnings, not just stats.
+
+Checks:
+  - Expired memories still in DB
+  - Memories never accessed (created >30d ago, access_count=0)
+  - Snapshot age (outdated if last session was >7d ago and snapshot not refreshed)
+  - Duplicate/overlapping memories (same key prefix, high count)
+  - Total token estimate vs recommended limit
+  - Tasks completed but not marked done (heuristic: done keywords in text)
+  - Memories with low importance that are very old
+
+Use this at the start of a session to decide whether to clean before loading full context.`,
+  {
+    project: z.string().describe("Project name"),
+  },
+  ({ project }) => {
+    try {
+      const issues: Array<{ severity: "error" | "warning" | "info"; message: string; action?: string }> = [];
+
+      // Expired memories
+      const expiredCount = (db.prepare(
+        `SELECT COUNT(*) as c FROM memories WHERE project = ? AND expires_at IS NOT NULL AND expires_at < datetime('now')`
+      ).get(project) as any)?.c ?? 0;
+      if (expiredCount > 0) {
+        issues.push({ severity: "error", message: `${expiredCount} expired memories still in DB`, action: "session_start() auto-purges them, or run forget() manually" });
+      }
+
+      // Never accessed memories (created >30d, access_count=0)
+      const neverAccessed = (db.prepare(
+        `SELECT COUNT(*) as c FROM memories WHERE project = ? AND access_count = 0 AND created_at < datetime('now', '-30 days') AND category != 'rule'`
+      ).get(project) as any)?.c ?? 0;
+      if (neverAccessed > 3) {
+        issues.push({ severity: "warning", message: `${neverAccessed} memories never accessed in 30+ days`, action: "clean(project, action='list') to review, then forget() stale ones" });
+      }
+
+      // Snapshot age
+      const snapshot = db.prepare(
+        `SELECT updated_at FROM memories WHERE project = ? AND key = '_snapshot'`
+      ).get(project) as any;
+      const lastSession = db.prepare(
+        `SELECT ended_at FROM sessions WHERE project = ? AND ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 1`
+      ).get(project) as any;
+      if (lastSession && !snapshot) {
+        issues.push({ severity: "warning", message: "No snapshot exists — session_end() was never called", action: "Always call session_end() when finishing work" });
+      } else if (snapshot && lastSession) {
+        const snapshotAgeDays = (Date.now() - new Date(snapshot.updated_at).getTime()) / (1000 * 60 * 60 * 24);
+        if (snapshotAgeDays > 7) {
+          issues.push({ severity: "info", message: `Snapshot is ${Math.round(snapshotAgeDays)}d old`, action: "Call session_end() to refresh snapshot" });
+        }
+      }
+
+      // Total memories count and token estimate
+      const totalMemories = (db.prepare(
+        `SELECT COUNT(*) as c FROM memories WHERE project = ? AND (expires_at IS NULL OR expires_at > datetime('now'))`
+      ).get(project) as any)?.c ?? 0;
+      const allValues = db.prepare(
+        `SELECT value FROM memories WHERE project = ? AND (expires_at IS NULL OR expires_at > datetime('now'))`
+      ).all(project) as any[];
+      const totalChars = allValues.reduce((sum: number, m: any) => sum + (m.value?.length ?? 0), 0);
+      const estimatedTokens = Math.ceil(totalChars / 4);
+      if (estimatedTokens > 8000) {
+        issues.push({ severity: "warning", message: `High token footprint: ~${estimatedTokens} tokens across ${totalMemories} memories`, action: "Use slim:true in session_start, or clean stale memories" });
+      }
+
+      // Duplicate key prefixes (>4 memories with same first segment)
+      const prefixCounts = db.prepare(
+        `SELECT SUBSTR(key, 1, INSTR(key || '-', '-') - 1) as prefix, COUNT(*) as c
+         FROM memories WHERE project = ? AND key != '_snapshot'
+         GROUP BY prefix HAVING c >= 4`
+      ).all(project) as any[];
+      for (const row of prefixCounts) {
+        issues.push({ severity: "info", message: `Key prefix '${row.prefix}-' has ${row.c} memories — possible overlap`, action: `compress(project, prefix='${row.prefix}') to collapse into one structured memory` });
+      }
+
+      // Low-importance memories older than 60 days
+      const lowOldCount = (db.prepare(
+        `SELECT COUNT(*) as c FROM memories WHERE project = ? AND importance <= 3 AND updated_at < datetime('now', '-60 days')`
+      ).get(project) as any)?.c ?? 0;
+      if (lowOldCount > 0) {
+        issues.push({ severity: "info", message: `${lowOldCount} low-importance memories older than 60d`, action: "Consider forget() or clean() to reduce noise" });
+      }
+
+      // Rules count
+      const rulesCount = (db.prepare(
+        `SELECT COUNT(*) as c FROM memories WHERE project = ? AND category = 'rule'`
+      ).get(project) as any)?.c ?? 0;
+
+      // Pending tasks count
+      const pendingCount = (db.prepare(
+        `SELECT COUNT(*) as c FROM tasks WHERE project = ? AND status = 'pending'`
+      ).get(project) as any)?.c ?? 0;
+
+      const score = Math.max(0, 100 - (issues.filter(i => i.severity === "error").length * 20) - (issues.filter(i => i.severity === "warning").length * 10) - (issues.filter(i => i.severity === "info").length * 5));
+
+      return ok({
+        project,
+        health_score: score,
+        status: score >= 80 ? "healthy" : score >= 50 ? "needs_attention" : "degraded",
+        stats: {
+          total_memories: totalMemories,
+          rules: rulesCount,
+          pending_tasks: pendingCount,
+          estimated_tokens: estimatedTokens,
+          expired_memories: expiredCount,
+        },
+        issues,
+        ...(issues.length === 0 && { message: "Project memory is clean and optimized." }),
+      });
+    } catch (e: unknown) {
+      return err(errOf(e));
+    }
+  }
+);
+
+// ── TOOL: compress ──────────────────────────────────────────────────────────
+server.tool(
+  "compress",
+  `Collapse multiple related memories into a single structured memory.
+Reduces token bloat when a topic has accumulated many small memories.
+
+Use when:
+  - Several memories share the same key prefix (health() will flag this)
+  - A topic has 3+ related memories that could be one structured note
+  - You want to reduce context size before a heavy session
+
+How it works:
+  1. Reads all memories matching the given keys (or prefix)
+  2. You provide the compressed value (structured summary of all of them)
+  3. ULTRON deletes the originals and saves the new compressed memory
+  4. The new memory gets importance = max(importance of originals)`,
+  {
+    project:          z.string().describe("Project name"),
+    keys:             z.array(z.string()).describe("Keys of memories to collapse into one"),
+    new_key:          z.string().describe("Key for the resulting compressed memory"),
+    new_value:        z.string().describe("Compressed content — structured summary of all source memories"),
+    new_category:     z.enum(["fact", "pattern", "preference", "warning", "note", "rule"]).optional().default("fact")
+                       .describe("Category for the compressed memory"),
+    preview_only:     z.boolean().optional().describe("If true, returns source memories without deleting — for review before compressing"),
+  },
+  ({ project, keys, new_key, new_value, new_category, preview_only }) => {
+    try {
+      if (keys.length < 2) return err("compress requires at least 2 keys to collapse");
+
+      const placeholders = keys.map(() => "?").join(",");
+      const sources = db.prepare(
+        `SELECT key, value, category, importance, related FROM memories WHERE project = ? AND key IN (${placeholders})`
+      ).all(project, ...keys) as any[];
+
+      if (sources.length === 0) return err(`No memories found for keys: ${keys.join(", ")}`);
+
+      if (preview_only) {
+        return ok({
+          preview: true,
+          project,
+          source_memories: sources.map((m: any) => ({ key: m.key, category: m.category, importance: m.importance, value: m.value })),
+          hint: "Review above, then call compress() without preview_only:true to execute.",
+        });
+      }
+
+      const maxImportance = Math.max(...sources.map((m: any) => m.importance ?? 5));
+      const allRelated = Array.from(new Set(
+        sources.flatMap((m: any) => { try { return JSON.parse(m.related || "[]"); } catch { return []; } })
+               .filter((k: string) => !keys.includes(k))
+      ));
+
+      // Delete source memories
+      db.prepare(`DELETE FROM memories WHERE project = ? AND key IN (${placeholders})`).run(project, ...keys);
+
+      // Insert compressed memory
+      const id = uuid();
+      db.prepare(
+        `INSERT INTO memories (id, project, key, value, category, importance, related, tool, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'claude-code', datetime('now'))
+         ON CONFLICT (project, key) DO UPDATE SET
+           value = excluded.value, category = excluded.category,
+           importance = excluded.importance, related = excluded.related, updated_at = excluded.updated_at`
+      ).run(id, project, new_key, new_value, new_category ?? "fact", maxImportance, JSON.stringify(allRelated));
+
+      return ok({
+        compressed: true,
+        project,
+        deleted_keys: sources.map((m: any) => m.key),
+        new_memory: { key: new_key, category: new_category ?? "fact", importance: maxImportance },
+        tokens_saved_estimate: Math.ceil(sources.reduce((sum: number, m: any) => sum + (m.value?.length ?? 0), 0) / 4),
       });
     } catch (e: unknown) {
       return err(errOf(e));
@@ -1172,16 +1469,18 @@ Strategies:
 
         // Memories: upsert with timestamp comparison
         const memStmt = db.prepare(
-          `INSERT INTO memories (id, project, key, value, category, tool, expires_at, last_accessed_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO memories (id, project, key, value, category, importance, tool, expires_at, last_accessed_at, access_count, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (project, key) DO UPDATE SET
              value = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.value ELSE memories.value END,
              category = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.category ELSE memories.category END,
+             importance = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.importance ELSE memories.importance END,
              tool = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.tool ELSE memories.tool END,
-             updated_at = MAX(excluded.updated_at, memories.updated_at)`
+             updated_at = MAX(excluded.updated_at, memories.updated_at),
+             access_count = MAX(excluded.access_count, memories.access_count)`
         );
         for (const m of data.memories ?? []) {
-          memStmt.run(m.id, m.project, m.key, m.value, m.category, m.tool, m.expires_at, m.last_accessed_at, m.created_at, m.updated_at);
+          memStmt.run(m.id, m.project, m.key, m.value, m.category, m.importance ?? 5, m.tool, m.expires_at, m.last_accessed_at, m.access_count ?? 0, m.created_at, m.updated_at);
           counts.memories++;
         }
 
