@@ -1,6 +1,6 @@
-// ── ULTRON Hub v5 — Helpers ──────────────────────────────────────────────────
+// ── ULTRON v8 — MCP result helpers ───────────────────────────────────────────
 
-type McpResult = { content: Array<{ type: "text"; text: string }> };
+export type McpResult = { content: Array<{ type: "text"; text: string }> };
 
 /** JSON response for structured data */
 export function ok(data: unknown): McpResult {
@@ -20,7 +20,6 @@ export function err(message: string): McpResult {
 /** Extract error message and log to stderr */
 export function errOf(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
-  console.error("[ULTRON]", msg);
   return msg;
 }
 
@@ -33,9 +32,4 @@ export function now(): string {
 export function truncate(s: string, max: number): string {
   if (!s || s.length <= max) return s;
   return s.slice(0, max) + "…";
-}
-
-/** Rough token estimate: ~4 chars per token for English/Spanish mixed text */
-export function estimateTokens(text: string): number {
-  return Math.ceil((text?.length ?? 0) / 4);
 }
