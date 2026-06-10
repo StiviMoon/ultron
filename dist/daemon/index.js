@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 
+// src/daemon/tasks.ts
+import { mkdirSync as mkdirSync3, readdirSync, unlinkSync } from "fs";
+import { join as join4 } from "path";
+import { homedir as homedir4 } from "os";
+
 // src/db/connection.ts
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
@@ -224,6 +229,38 @@ var MIGRATIONS = [
         }
       }
     }
+  },
+  {
+    version: 10,
+    name: "memory_links FK cascade + decisions supersedes",
+    up: (db2) => {
+      addColumnIfMissing(db2, "decisions", "supersedes", "supersedes TEXT");
+      const hasFk = db2.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_links'").get();
+      if (hasFk?.sql?.includes("REFERENCES memories")) return;
+      db2.exec(`
+        CREATE TABLE memory_links_new (
+          from_id    TEXT NOT NULL,
+          to_id      TEXT NOT NULL,
+          relation   TEXT NOT NULL DEFAULT 'manual' CHECK (relation IN ('manual','semantic')),
+          weight     REAL NOT NULL DEFAULT 1.0,
+          created_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (from_id, to_id, relation),
+          FOREIGN KEY (from_id) REFERENCES memories(id) ON DELETE CASCADE,
+          FOREIGN KEY (to_id) REFERENCES memories(id) ON DELETE CASCADE
+        );
+      `);
+      db2.exec(`
+        INSERT OR IGNORE INTO memory_links_new (from_id, to_id, relation, weight, created_at)
+        SELECT l.from_id, l.to_id, l.relation, l.weight, l.created_at
+        FROM memory_links l
+        WHERE EXISTS (SELECT 1 FROM memories m WHERE m.id = l.from_id)
+          AND EXISTS (SELECT 1 FROM memories m WHERE m.id = l.to_id);
+      `);
+      db2.exec("DROP TABLE memory_links;");
+      db2.exec("ALTER TABLE memory_links_new RENAME TO memory_links;");
+      db2.exec("CREATE INDEX IF NOT EXISTS idx_links_from ON memory_links (from_id);");
+      db2.exec("CREATE INDEX IF NOT EXISTS idx_links_to ON memory_links (to_id);");
+    }
   }
 ];
 function runMigrations(db2) {
@@ -299,7 +336,16 @@ function projectHealth(project) {
   const prefixes = db.prepare(
     `SELECT SUBSTR(key,1,INSTR(key||'-','-')-1) prefix, COUNT(*) c FROM memories WHERE project = ? AND key != '_snapshot' GROUP BY prefix HAVING c >= 4`
   ).all(project);
-  for (const p of prefixes) issues.push({ severity: "info", message: `Prefix '${p.prefix}-' has ${p.c} memories \u2014 possible overlap`, action: `compress(project, prefix='${p.prefix}')` });
+  for (const p of prefixes) {
+    const keys = db.prepare(
+      `SELECT key FROM memories WHERE project = ? AND key LIKE ? AND key != '_snapshot' LIMIT 5`
+    ).all(project, `${p.prefix}-%`);
+    issues.push({
+      severity: "info",
+      message: `Prefix '${p.prefix}-' has ${p.c} memories \u2014 possible overlap`,
+      action: `compress(project, keys=[${keys.map((k) => `'${k.key}'`).join(", ")}], new_key='${p.prefix}-summary', new_value='...')`
+    });
+  }
   if (isVecEnabled()) {
     const missingEmb = count(`SELECT COUNT(*) c FROM memories WHERE project = ? AND embedded_at IS NULL`);
     if (missingEmb > 0) issues.push({ severity: "info", message: `${missingEmb} memories without semantic embedding`, action: "runs automatically on save; backfill via daemon" });
@@ -404,6 +450,52 @@ async function searchVector(query, projects, limit = 20) {
   ).all(vec, limit * 3, ...projects);
   return rows.slice(0, limit);
 }
+function deleteVector(rowid) {
+  if (!isVecEnabled()) return;
+  try {
+    db.prepare("DELETE FROM vec_memories WHERE rowid = ?").run(BigInt(rowid));
+  } catch {
+  }
+}
+
+// src/repositories/memory.repo.ts
+function deleteMemories(project, keys) {
+  if (keys.length === 0) return 0;
+  const ph = keys.map(() => "?").join(",");
+  const rows = db.prepare(`SELECT id, rowid FROM memories WHERE project = ? AND key IN (${ph})`).all(project, ...keys);
+  if (rows.length === 0) return 0;
+  const tx = db.transaction(() => {
+    for (const row of rows) deleteVector(row.rowid);
+    const ids = rows.map((r) => r.id);
+    const idPh = ids.map(() => "?").join(",");
+    db.prepare(`DELETE FROM memory_links WHERE from_id IN (${idPh}) OR to_id IN (${idPh})`).run(...ids, ...ids);
+    db.prepare(`DELETE FROM memories WHERE project = ? AND key IN (${ph})`).run(project, ...keys);
+  });
+  tx();
+  return rows.length;
+}
+function purgeExpiredAll() {
+  const expired = db.prepare(
+    `SELECT project, key FROM memories WHERE expires_at IS NOT NULL AND expires_at < datetime('now')`
+  ).all();
+  const byProject = /* @__PURE__ */ new Map();
+  for (const e of expired) {
+    const list = byProject.get(e.project) ?? [];
+    list.push(e.key);
+    byProject.set(e.project, list);
+  }
+  let total = 0;
+  for (const [project, keys] of byProject) total += deleteMemories(project, keys);
+  return total;
+}
+function decayImportance(project, days = 60) {
+  return db.prepare(
+    `UPDATE memories SET importance = MAX(1, importance - 1)
+       WHERE project = ? AND category NOT IN ('rule', 'warning')
+         AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now','-' || ? || ' days'))
+         AND importance > 1`
+  ).run(project, days).changes;
+}
 
 // src/services/graph.service.ts
 function rebuildManualLinks(project) {
@@ -432,12 +524,14 @@ function rebuildManualLinks(project) {
   });
   return tx();
 }
-async function rebuildSemanticLinks(project, threshold = 0.55, perNode = 3) {
+async function rebuildSemanticLinksIncremental(project, since, threshold = 0.55, perNode = 3) {
   if (!isVecEnabled()) return 0;
-  const memories = db.prepare("SELECT id, key, value FROM memories WHERE project = ? AND key != '_snapshot'").all(project);
+  const sql = since ? "SELECT id, key, value FROM memories WHERE project = ? AND key != '_snapshot' AND updated_at > ?" : "SELECT id, key, value FROM memories WHERE project = ? AND key != '_snapshot'";
+  const memories = since ? db.prepare(sql).all(project, since) : db.prepare(sql).all(project);
+  if (memories.length === 0) return 0;
   let n = 0;
-  db.prepare("DELETE FROM memory_links WHERE relation = 'semantic' AND from_id IN (SELECT id FROM memories WHERE project = ?)").run(project);
   for (const m of memories) {
+    db.prepare("DELETE FROM memory_links WHERE relation = 'semantic' AND from_id = ?").run(m.id);
     const neighbors = await searchVector(`${m.key}
 ${m.value}`, [project], perNode + 1);
     for (const nb of neighbors) {
@@ -450,12 +544,15 @@ ${m.value}`, [project], perNode + 1);
       n++;
     }
   }
-  log.info("semantic links rebuilt", { project, edges: n });
+  if (n > 0) log.info("semantic links incremental", { project, edges: n, memories: memories.length });
   return n;
 }
 
 // src/daemon/tasks.ts
 var AGENT = "ultron-daemon";
+var ULTRON_DIR4 = process.env.ULTRON_DIR ?? join4(homedir4(), ".ultron");
+var BACKUP_DIR = join4(ULTRON_DIR4, "backups");
+var MAX_BACKUPS = 7;
 function logRun(action, project, detail) {
   db.prepare("INSERT INTO agent_runs (id, agent, project, action, detail, ended_at) VALUES (?, ?, ?, ?, ?, datetime('now'))").run(
     uuid(),
@@ -470,24 +567,30 @@ function allProjects() {
     `SELECT DISTINCT project FROM (SELECT project FROM memories UNION SELECT project FROM tasks)`
   ).all().map((r) => r.project);
 }
+function getMeta(key) {
+  const row = db.prepare("SELECT value FROM _meta WHERE key = ?").get(key);
+  return row?.value ?? null;
+}
+function setMeta(key, value) {
+  db.prepare("INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)").run(key, value);
+}
 function nightlyCurator(dryRun2) {
   const projects = allProjects();
   const report = { projects: projects.length, dryRun: dryRun2 };
   let purged = 0;
-  for (const p of projects) {
-    if (!dryRun2) {
-      purged += db.prepare(
-        `DELETE FROM memories WHERE project = ? AND expires_at IS NOT NULL AND expires_at < datetime('now')`
-      ).run(p).changes;
-    }
+  let decayed = 0;
+  if (!dryRun2) {
+    purged = purgeExpiredAll();
+    for (const p of projects) decayed += decayImportance(p, 60);
   }
   report.purged_expired = purged;
+  report.decayed_importance = decayed;
   const degraded = projects.map((p) => projectHealth(p)).filter((h) => h.health_score < 80).map((h) => ({ project: h.project, score: h.health_score, status: h.status }));
   report.needs_attention = degraded;
   if (!dryRun2) {
     const wc = db.pragma("wal_checkpoint(TRUNCATE)");
     report.wal_checkpoint = wc;
-    logRun("nightly-curator", null, `purged=${purged} degraded=${degraded.length}`);
+    logRun("nightly-curator", null, `purged=${purged} decayed=${decayed} degraded=${degraded.length}`);
   }
   return report;
 }
@@ -503,13 +606,38 @@ async function memoryGardener(dryRun2) {
     report.embedded = await backfillEmbeddings(64);
   }
   if (!dryRun2) {
+    const since = getMeta("last_gardener_run");
     let manual = 0, semantic = 0;
     for (const p of allProjects()) {
       manual += rebuildManualLinks(p);
-      semantic += await rebuildSemanticLinks(p);
+      semantic += await rebuildSemanticLinksIncremental(p, since);
     }
+    setMeta("last_gardener_run", (/* @__PURE__ */ new Date()).toISOString());
     report.links = { manual, semantic };
     logRun("memory-gardener", null, `embedded_missing=${missing} links_manual=${manual} links_semantic=${semantic}`);
+  }
+  return report;
+}
+function rotateBackup(dryRun2) {
+  const report = { dryRun: dryRun2 };
+  if (dryRun2) return { ...report, skipped: "dry run" };
+  mkdirSync3(BACKUP_DIR, { recursive: true });
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const dest = join4(BACKUP_DIR, `ultron-${stamp}.db`);
+  try {
+    db.prepare("VACUUM INTO ?").run(dest);
+    report.backup = dest;
+    const files = readdirSync(BACKUP_DIR).filter((f) => f.startsWith("ultron-") && f.endsWith(".db")).sort().reverse();
+    const removed = [];
+    for (const f of files.slice(MAX_BACKUPS)) {
+      unlinkSync(join4(BACKUP_DIR, f));
+      removed.push(f);
+    }
+    report.removed_old = removed;
+    logRun("backup", null, `created=${dest} removed=${removed.length}`);
+  } catch (e) {
+    report.error = String(e);
+    log.error("backup failed", { error: String(e) });
   }
   return report;
 }
@@ -519,7 +647,9 @@ async function runAll(dryRun2) {
   log.info("nightly-curator done", nc);
   const mg = await memoryGardener(dryRun2);
   log.info("memory-gardener done", mg);
-  console.error("[ultron-daemon]", JSON.stringify({ nightlyCurator: nc, memoryGardener: mg }, null, 2));
+  const bk = rotateBackup(dryRun2);
+  log.info("backup done", bk);
+  console.error("[ultron-daemon]", JSON.stringify({ nightlyCurator: nc, memoryGardener: mg, backup: bk }, null, 2));
 }
 
 // src/daemon/index.ts

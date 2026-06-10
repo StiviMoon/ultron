@@ -36,9 +36,19 @@ describe("migrations", () => {
     runMigrations(db);
   });
 
-  it("bumps schema_version to 9", () => {
+  it("bumps schema_version to 10", () => {
     const v = (db.prepare("SELECT value FROM _meta WHERE key='schema_version'").get() as { value: string }).value;
-    expect(v).toBe("9");
+    expect(v).toBe("10");
+  });
+
+  it("adds supersedes column to decisions", () => {
+    const cols = (db.prepare("PRAGMA table_info(decisions)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toContain("supersedes");
+  });
+
+  it("memory_links has FK to memories", () => {
+    const sql = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_links'").get() as { sql: string }).sql;
+    expect(sql).toContain("REFERENCES memories");
   });
 
   it("adds v8 columns (agent, embedded_at)", () => {

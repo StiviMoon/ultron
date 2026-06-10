@@ -1,120 +1,106 @@
-# ULTRON Hub — Arquitectura del sistema
+# ULTRON Hub v9 — Architecture
 
-Genera un diagrama de arquitectura visual, moderno y limpio que represente el siguiente sistema. Usá el estilo de diagramas técnicos profesionales (como los de Excalidraw o Mermaid, pero renderizado como imagen clara).
+## Overview
 
----
-
-## Descripción del sistema
-
-**ULTRON Hub** es un servidor MCP (Model Context Protocol) que actúa como capa de memoria persistente entre herramientas de IA (Claude Code, Cursor) y una base de datos SQLite local.
-
----
-
-## Componentes principales
-
-### 1. Herramientas de IA (clientes MCP)
-- **Claude Code** — CLI de Anthropic para desarrollo asistido por IA
-- **Cursor** — IDE con IA integrada
-- Cualquier cliente compatible con MCP
-- Se conectan a ULTRON via **stdio** (protocolo estándar MCP)
-
-### 2. ULTRON Hub (servidor MCP — Node.js)
-Es el núcleo del sistema. Corre como proceso local. Expone **18 herramientas MCP**.
-
-Módulos internos:
-- **`src/index.ts`** — Servidor MCP con los 18 tools
-- **`src/db.ts`** — Conexión SQLite + schema auto-init + migraciones
-- **`src/helpers.ts`** — Funciones puras: ok(), err(), truncate(), estimateTokens()
-
-### 3. Base de datos SQLite local
-Archivo único en `~/.ultron/ultron.db`
-
-4 tablas principales:
-- **`memories`** — conocimiento persistente clave-valor por proyecto. Columnas clave: `project`, `key`, `value`, `category` (fact/pattern/warning/preference/note), `related` (JSON array de keys vinculadas), `last_accessed_at`, `expires_at`
-- **`tasks`** — backlog persistente por proyecto. Columnas clave: `project`, `text`, `status` (pending/done), `priority` (high/medium/low), `tags` (JSON array)
-- **`decisions`** — decisiones técnicas inmutables. Columnas: `project`, `topic`, `choice`, `reason`
-- **`sessions`** — historial de sesiones por herramienta. Columnas: `project`, `tool`, `summary`, `files` (JSON), `started_at`, `ended_at`
-
-Características técnicas de la BD:
-- **FTS5** — búsqueda full-text en memories (tabla virtual `memories_fts` + 3 triggers de sync)
-- **WAL mode** — Write-Ahead Logging para concurrencia
-- **Schema auto-init** — CREATE TABLE IF NOT EXISTS en cada arranque
-- **Migraciones automáticas** — ALTER TABLE para upgrades sin romper datos existentes
-
----
-
-## Flujo de datos (session workflow)
+ULTRON Hub is a local MCP (Model Context Protocol) server that provides persistent developer memory for AI agents. All data lives in `~/.ultron/ultron.db` — no cloud, no API keys.
 
 ```
-1. Developer abre Claude Code / Cursor
-2. La IA llama → session_start("proyecto", "claude-code")
-3. ULTRON consulta SQLite → devuelve: warnings primero, tareas por prioridad, snapshot, decisiones
-4. Durante el trabajo:
-   - remember() → INSERT/UPSERT en memories
-   - task() → INSERT/UPDATE en tasks
-   - decision() → INSERT en decisions (inmutable)
-   - search() → FTS5 MATCH en memories_fts
-5. Al cerrar: session_end() → UPDATE sessions + auto-genera _snapshot en memories
-6. Próxima sesión: el _snapshot comprimido carga en milisegundos
+Claude Code / Cursor / any MCP client
+         │ stdio MCP
+         ▼
+┌─────────────────────────────────────────┐
+│  ULTRON Hub (Node.js)                   │
+│  ┌─────────┐ ┌──────────┐ ┌─────────┐  │
+│  │ Tools   │ │ Resources│ │ Prompts │  │
+│  │ (25)    │ │ (3)      │ │ (3)     │  │
+│  └────┬────┘ └────┬─────┘ └────┬────┘  │
+│       └───────────┼────────────┘        │
+│                   ▼                     │
+│            Services layer               │
+│     recall · health · graph · embed     │
+│                   ▼                     │
+│           Repositories layer            │
+│     memory · task · session · sync      │
+│                   ▼                     │
+│         SQLite + FTS5 + sqlite-vec      │
+└─────────────────────────────────────────┘
+         ▲                    ▲
+         │ WAL (shared)       │
+┌────────┴──────┐    ┌───────┴────────┐
+│ ultron-daemon │    │ ~/.ultron/     │
+│ curator       │    │ backups/       │
+│ gardener      │    │ models/        │
+│ backup        │    │                │
+└───────────────┘    └────────────────┘
 ```
 
----
+## Layer responsibilities
 
-## Los 18 tools agrupados por función
+| Layer | Path | Role |
+|-------|------|------|
+| Boot | `src/index.ts` | MCP server init, warmup, `init` CLI |
+| Tools | `src/tools/*` | MCP tool definitions (Zod + defineTool) |
+| Resources | `src/resources/registry.ts` | Navigable context without tool calls |
+| Prompts | `src/prompts/registry.ts` | Guided workflows for agents |
+| Services | `src/services/*` | Business logic (recall, health, graph, rules) |
+| Repositories | `src/repositories/*` | **Only place with SQL** |
+| DB | `src/db/*` | Schema, connection, versioned migrations |
 
-**Memoria (7):**
-`session_start` · `recall` · `remember` · `note` · `forget` · `search` · `clean`
+## Database schema
 
-**Tareas y decisiones (3):**
-`task` · `decision` · `list_decisions`
+| Table | Purpose |
+|-------|---------|
+| `memories` | Key-value knowledge per project (categories, importance, embeddings) |
+| `tasks` | Persistent backlog with priority and tags |
+| `decisions` | Immutable technical decisions (chainable via `supersedes`) |
+| `sessions` | Session history per tool |
+| `memory_links` | Knowledge graph edges (manual + semantic, FK CASCADE) |
+| `agents` | Agent registry |
+| `agent_runs` | Agent audit log |
+| `vec_memories` | sqlite-vec embedding table (rowid = memories.rowid) |
+| `memories_fts` | FTS5 virtual table for keyword search |
+| `_meta` | Schema version and daemon state |
 
-**Sesiones y proyectos (3):**
-`session_end` · `projects` · `handoff`
+## Search pipeline
 
-**Inteligencia (2):**
-`generate_rules` · `token_budget`
+```
+query → FTS5 keyword search ──┐
+                               ├── RRF fusion → ranked results
+query → embed → KNN search ───┘
+```
 
-**Sync (2):**
-`export_project` · `import_project`
+Degrades to keyword-only if sqlite-vec is unavailable.
 
----
+## Session workflow
 
-## Diagrama a generar
+1. `session_start(project, tool)` — purge expired, open session, load context
+2. Work — `remember`, `task`, `decision`, `search`
+3. `session_end(project, tool, summary, files)` — close session, refresh `_snapshot`
 
-Crear un diagrama que muestre claramente:
+## Data integrity rules
 
-1. **Capa superior** — Las herramientas de IA (Claude Code, Cursor, "Other MCP client") conectadas por flechas al servidor ULTRON con la etiqueta "MCP / stdio"
+- **All memory deletes** go through `memoryRepo.deleteMemories()` — cleans vectors + links
+- **All memory upserts** set `embedded_at = NULL` → triggers re-embed
+- **Migrations** are versioned in `_meta.schema_version` (currently v10)
 
-2. **Capa media** — ULTRON Hub como caja central con:
-   - Los 18 tools agrupados visualmente en sus 5 categorías
-   - Las 3 capas internas: index.ts (tools), db.ts (SQLite layer), helpers.ts (utils)
+## Daemon tasks
 
-3. **Capa inferior** — La base de datos SQLite con las 4 tablas (memories, tasks, decisions, sessions) y las features especiales (FTS5, WAL, auto-snapshot, related graph)
+| Task | Interval | Action |
+|------|----------|--------|
+| nightly-curator | 6h | Purge expired, decay importance, WAL checkpoint |
+| memory-gardener | 6h | Backfill embeddings, incremental semantic links |
+| backup | 6h | `VACUUM INTO` rotating backup (keep 7) |
 
-4. **Flecha lateral** — `generate_rules` → `CLAUDE.md` del proyecto (output de inteligencia)
+## MCP surface
 
-5. **Flecha lateral** — `handoff` → Claude.ai / ChatGPT (para cuando no hay MCP)
+- **25 tools** — memory, session, work, intelligence, sync, agents, onboard
+- **3 resources** — projects list, project context, project rules
+- **3 prompts** — start-session, end-session, audit-memory
 
-6. **Flujo de sesión** — Una línea de tiempo o secuencia que muestre: session_start → work → session_end → _snapshot → next session_start
+## Key design decisions
 
-**Estilo sugerido:**
-- Fondo oscuro (#0d1117 o similar) o blanco limpio
-- Colores por categoría de tool: rojo para warnings/clean, verde para memoria, azul para sesiones, naranja para inteligencia
-- Íconos simples: base de datos para SQLite, cerebro o chip para ULTRON, terminal para Claude Code
-- Fuente monospace para nombres de tools y tablas
-- Flechas con etiquetas en los flujos principales
-
----
-
-## Datos adicionales para el diagrama
-
-- El archivo de datos es UN solo archivo: `~/.ultron/ultron.db`
-- No hay servidor externo, no hay red, todo es local
-- El proceso ULTRON Hub corre como daemon silencioso en segundo plano
-- Múltiples herramientas (Claude Code + Cursor) pueden leer la misma BD simultáneamente gracias a WAL
-- La columna `related` en memories forma un grafo de conocimiento navegable
-- El `_snapshot` es una memory especial que se sobreescribe en cada session_end
-
----
-
-*ULTRON Hub v6 — github.com/StiviMoon/ultron*
+1. **Local-first** — privacy, zero config, works offline
+2. **Repository pattern** — zero SQL in tools (enforced in v9)
+3. **Agent ergonomics** — descriptions, examples, `next_actions`, `onboard`
+4. **Graceful degradation** — keyword-only if vectors fail
+5. **Separate daemon** — background work off stdio MCP process

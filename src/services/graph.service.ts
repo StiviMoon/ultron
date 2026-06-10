@@ -60,6 +60,38 @@ export async function rebuildSemanticLinks(project: string, threshold = 0.55, pe
   return n;
 }
 
+/** Incremental semantic link rebuild — only memories updated since last gardener run. */
+export async function rebuildSemanticLinksIncremental(
+  project: string, since: string | null, threshold = 0.55, perNode = 3
+): Promise<number> {
+  if (!isVecEnabled()) return 0;
+  const sql = since
+    ? "SELECT id, key, value FROM memories WHERE project = ? AND key != '_snapshot' AND updated_at > ?"
+    : "SELECT id, key, value FROM memories WHERE project = ? AND key != '_snapshot'";
+  const memories = (since
+    ? db.prepare(sql).all(project, since)
+    : db.prepare(sql).all(project)) as Array<{ id: string; key: string; value: string }>;
+
+  if (memories.length === 0) return 0;
+
+  let n = 0;
+  for (const m of memories) {
+    db.prepare("DELETE FROM memory_links WHERE relation = 'semantic' AND from_id = ?").run(m.id);
+    const neighbors = await searchVector(`${m.key}\n${m.value}`, [project], perNode + 1);
+    for (const nb of neighbors) {
+      if (nb.id === m.id) continue;
+      const sim = 1 - nb.distance / 2;
+      if (sim < threshold) continue;
+      db.prepare(
+        "INSERT OR IGNORE INTO memory_links (from_id, to_id, relation, weight) VALUES (?, ?, 'semantic', ?)"
+      ).run(m.id, nb.id, sim);
+      n++;
+    }
+  }
+  if (n > 0) log.info("semantic links incremental", { project, edges: n, memories: memories.length });
+  return n;
+}
+
 /** BFS neighborhood around a memory key, up to `depth` hops. */
 export function neighborhood(project: string, key: string, depth = 1): {
   root: string;

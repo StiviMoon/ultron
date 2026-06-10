@@ -1,7 +1,9 @@
-# ULTRON Hub — Guía de uso
+# ULTRON Hub v9 — Guía de uso
 
-> El sistema de memoria persistente para Claude Code y Cursor.
-> Tu IA no olvida nada entre sesiones.
+> El sistema de memoria persistente para Claude Code, Cursor y cualquier cliente MCP.
+> Tu IA no olvida nada entre sesiones. 25 tools + resources + prompts.
+
+**Agentes de IA:** lee [AGENTS.md](AGENTS.md) — protocolo instantáneo para cualquier modelo.
 
 ---
 
@@ -142,62 +144,58 @@ Las más valiosas son `warning` y `pattern` — cargan primero en `session_start
 
 ---
 
-## Los 18 tools — cuándo usar cada uno
+## Los 25 tools — cuándo usar cada uno
+
+> Cada respuesta incluye `next_actions` — el agente siempre sabe qué hacer después.
+> Primera vez: llamá `onboard()` para aprender el protocolo completo.
 
 ### Sesión
 
 | Tool | Cuándo |
 |---|---|
+| `onboard` | Primera vez con ULTRON, o si no sabés qué tool usar |
 | `session_start` | Siempre al abrir un proyecto |
 | `session_end` | Siempre al cerrar, con un buen resumen |
+| `projects` | Ver todos los proyectos y sus stats |
+| `handoff` | Llevar contexto a Claude.ai / ChatGPT sin MCP |
 
 ### Memoria
 
 | Tool | Cuándo |
 |---|---|
-| `remember` | Cuando aprendés algo sobre el proyecto que no querés explicar de vuelta |
-| `note` | Pensamiento rápido, no hace falta estructurarlo |
-| `forget` | Cuando una memoria quedó desactualizada |
-| `recall` | Para cargar contexto manualmente (session_start ya lo hace) |
-| `clean` | Para limpiar memorias que nadie consultó en 45+ días |
+| `remember` | Cuando aprendés algo que no querés explicar de vuelta |
+| `note` | Pensamiento rápido, sin elegir key |
+| `forget` | Memoria desactualizada (limpia vector + grafo) |
+| `recall` | Cargar contexto mid-session (session_start ya lo hace al inicio) |
+| `search` | Buscar antes de crear duplicados (modo hybrid por defecto) |
+| `clean` | Limpiar memorias sin acceso en 45+ días |
 
-### Búsqueda
-
-| Tool | Cuándo |
-|---|---|
-| `search` | Cuando sabés que hay algo guardado pero no recordás la key |
-
-### Tareas
+### Tareas y decisiones
 
 | Tool | Cuándo |
 |---|---|
-| `task add` | Al descubrir algo que falta hacer |
-| `task add` con tags | Cuando querés agrupar tareas por área |
-| `task done` | Al completar |
-| `task list` | Para ver todo el backlog |
-| `task list` con filter_tag | Para ver solo las tareas de un área |
-
-### Decisiones
-
-| Tool | Cuándo |
-|---|---|
-| `decision` | Al elegir una tecnología, patrón, o enfoque sobre otros |
-| `list_decisions` | Para revisar el historial de decisiones |
+| `task add/done/list` | Backlog persistente entre sesiones |
+| `decision` | Elegir tecnología, patrón o enfoque (inmutable) |
+| `list_decisions` | Historial con cadena `supersedes` |
 
 ### Inteligencia
 
 | Tool | Cuándo |
 |---|---|
-| `generate_rules` | Cuando querés actualizar el CLAUDE.md con lo aprendido |
-| `token_budget` | Si el recall empieza a sentirse pesado |
-| `handoff` | Para llevar contexto a Claude.ai o ChatGPT sin MCP |
+| `health` | Antes de sesiones largas o si recall se siente lento |
+| `metrics` | Cobertura semántica y memorias más usadas |
+| `graph` | Explorar conocimiento relacionado |
+| `compress` | Fusionar memorias con prefijo duplicado |
+| `generate_rules` | Exportar reglas (format: claude, cursor, agents) |
+| `token_budget` | Estimar costo de tokens del recall |
 
-### Sync
+### Sync y agentes
 
 | Tool | Cuándo |
 |---|---|
-| `export_project` | Backup o para mover datos a otra máquina |
-| `import_project` | Restaurar desde export |
+| `export_project` | Backup completo (links, agents, runs) |
+| `import_project` | Restaurar en otra máquina (re-embed automático) |
+| `agent_register/log/handoff` | Ecosistema de subagentes |
 
 ---
 
@@ -368,4 +366,4 @@ cp ~/.ultron/ultron.db ~/backups/ultron-$(date +%Y%m%d).db
 
 ---
 
-*ULTRON Hub v6 — https://github.com/StiviMoon/ultron*
+*ULTRON Hub v9 — https://github.com/StiviMoon/ultron*

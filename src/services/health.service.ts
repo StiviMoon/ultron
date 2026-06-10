@@ -36,7 +36,16 @@ export function projectHealth(project: string) {
   const prefixes = db.prepare(
     `SELECT SUBSTR(key,1,INSTR(key||'-','-')-1) prefix, COUNT(*) c FROM memories WHERE project = ? AND key != '_snapshot' GROUP BY prefix HAVING c >= 4`
   ).all(project) as Array<{ prefix: string; c: number }>;
-  for (const p of prefixes) issues.push({ severity: "info", message: `Prefix '${p.prefix}-' has ${p.c} memories — possible overlap`, action: `compress(project, prefix='${p.prefix}')` });
+  for (const p of prefixes) {
+    const keys = db.prepare(
+      `SELECT key FROM memories WHERE project = ? AND key LIKE ? AND key != '_snapshot' LIMIT 5`
+    ).all(project, `${p.prefix}-%`) as Array<{ key: string }>;
+    issues.push({
+      severity: "info",
+      message: `Prefix '${p.prefix}-' has ${p.c} memories — possible overlap`,
+      action: `compress(project, keys=[${keys.map((k) => `'${k.key}'`).join(", ")}], new_key='${p.prefix}-summary', new_value='...')`,
+    });
+  }
 
   // v8: embeddings missing
   if (isVecEnabled()) {

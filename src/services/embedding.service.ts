@@ -39,6 +39,12 @@ export function embeddingsAvailable(): boolean {
   return available;
 }
 
+/** Pre-load model in background — call at MCP boot to avoid first-call latency. */
+export function warmupEmbeddings(): void {
+  if (!available) return;
+  void getExtractor().catch(() => { /* logged inside getExtractor */ });
+}
+
 /** Embed one text → Float32Array(384), or null if the model can't load. */
 export async function embedOne(text: string): Promise<Float32Array | null> {
   const out = await embedMany([text]);

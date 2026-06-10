@@ -1,7 +1,7 @@
 {
   "name": "ultron-hub",
-  "version": "8.0.0",
-  "description": "Persistent semantic developer memory for Claude Code, Cursor, and any MCP client. Local SQLite + sqlite-vec + local embeddings, zero config.",
+  "version": "9.0.0",
+  "description": "The best persistent developer memory for AI agents. Local SQLite + hybrid search + MCP resources. Works with Claude Code, Cursor, and any MCP client.",
   "type": "module",
   "bin": {
     "ultron-hub": "dist/index.js",
@@ -11,13 +11,20 @@
     "dist",
     "templates",
     "README.md",
+    "AGENTS.md",
+    "docs",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
-    "smoke": "tsx scripts/smoke-test.ts"
+    "smoke": "tsx scripts/smoke-test.ts",
+    "init": "node dist/index.js init",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",

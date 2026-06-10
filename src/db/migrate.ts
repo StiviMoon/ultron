@@ -87,6 +87,42 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 10,
+    name: "memory_links FK cascade + decisions supersedes",
+    up: (db) => {
+      addColumnIfMissing(db, "decisions", "supersedes", "supersedes TEXT");
+
+      const hasFk = db
+        .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_links'")
+        .get() as { sql: string } | undefined;
+      if (hasFk?.sql?.includes("REFERENCES memories")) return;
+
+      db.exec(`
+        CREATE TABLE memory_links_new (
+          from_id    TEXT NOT NULL,
+          to_id      TEXT NOT NULL,
+          relation   TEXT NOT NULL DEFAULT 'manual' CHECK (relation IN ('manual','semantic')),
+          weight     REAL NOT NULL DEFAULT 1.0,
+          created_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (from_id, to_id, relation),
+          FOREIGN KEY (from_id) REFERENCES memories(id) ON DELETE CASCADE,
+          FOREIGN KEY (to_id) REFERENCES memories(id) ON DELETE CASCADE
+        );
+      `);
+      db.exec(`
+        INSERT OR IGNORE INTO memory_links_new (from_id, to_id, relation, weight, created_at)
+        SELECT l.from_id, l.to_id, l.relation, l.weight, l.created_at
+        FROM memory_links l
+        WHERE EXISTS (SELECT 1 FROM memories m WHERE m.id = l.from_id)
+          AND EXISTS (SELECT 1 FROM memories m WHERE m.id = l.to_id);
+      `);
+      db.exec("DROP TABLE memory_links;");
+      db.exec("ALTER TABLE memory_links_new RENAME TO memory_links;");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_links_from ON memory_links (from_id);");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_links_to ON memory_links (to_id);");
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseType): void {

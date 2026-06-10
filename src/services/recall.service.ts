@@ -90,12 +90,13 @@ export function fetchProjectContext(project: string, options: FetchContextOption
 
 /** Hybrid memory search: FTS5 + vector KNN fused with RRF. */
 export async function searchMemories(
-  query: string, projects: string[], mode: SearchMode = "hybrid", limit = 20
+  query: string, projects: string[], mode: SearchMode = "hybrid", limit = 20,
+  filters?: { category?: import("../db/types.js").Category; minImportance?: number }
 ): Promise<MemoryRow[]> {
   const useKeyword = mode === "keyword" || mode === "hybrid";
   const useSemantic = (mode === "semantic" || mode === "hybrid") && isVecEnabled();
 
-  const keywordRows = useKeyword ? memoryRepo.ftsSearch(query, projects, limit * 2) : [];
+  const keywordRows = useKeyword ? memoryRepo.ftsSearch(query, projects, limit * 2, filters) : [];
   const semanticHits = useSemantic ? await searchVector(query, projects, limit * 2) : [];
 
   if (!useSemantic) {

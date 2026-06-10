@@ -26,16 +26,27 @@ export function add(project: string, text: string, priority: Priority, tags: str
   return id;
 }
 
-/** Resolve a numeric position (1-based, among pending) or pass through a UUID. */
+/** Resolve a numeric position (1-based, among pending by priority) or pass through a UUID. */
 export function resolveId(project: string, rawId: string): string | null {
   const pos = parseInt(rawId, 10);
   if (!isNaN(pos) && String(pos) === rawId) {
-    const list = db
-      .prepare("SELECT id FROM tasks WHERE project = ? AND status = 'pending' ORDER BY created_at ASC")
-      .all(project) as Array<{ id: string }>;
-    return list[pos - 1]?.id ?? null;
+    return pending(project)[pos - 1]?.id ?? null;
   }
   return rawId;
+}
+
+export function search(query: string, projects: string[], limit = 10): TaskRow[] {
+  const ph = projects.map(() => "?").join(",");
+  const terms = query.trim().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return [];
+  const likeClauses = terms.map(() => "text LIKE ?").join(" AND ");
+  const likeArgs = terms.map((t) => `%${t}%`);
+  return db
+    .prepare(
+      `SELECT * FROM tasks WHERE project IN (${ph}) AND ${likeClauses}
+       ORDER BY ${PRIORITY_ORDER}, created_at DESC LIMIT ?`
+    )
+    .all(...projects, ...likeArgs, limit) as TaskRow[];
 }
 
 export function update(

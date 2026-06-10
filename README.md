@@ -1,75 +1,29 @@
-# ULTRON Hub
+# ULTRON Hub v9
 
-> Your AI assistant forgets everything between sessions. ULTRON fixes that.
+> The best persistent memory for AI agents. Your assistant never forgets.
 
-Persistent developer memory for **Claude Code**, **Cursor**, and any MCP-compatible tool.  
-Local SQLite — no accounts, no API keys, no cloud.
+Local SQLite memory for **Claude Code**, **Cursor**, and any MCP-compatible tool.  
+Hybrid keyword + semantic search. Zero cloud. Zero API keys.
+
+[![CI](https://github.com/StiviMoon/ultron/actions/workflows/ci.yml/badge.svg)](https://github.com/StiviMoon/ultron/actions/workflows/ci.yml)
 
 ---
 
-## Install
+## Quick start
 
 ```bash
+# Option A: clone + build
 git clone https://github.com/StiviMoon/ultron
-cd ultron
-npm install
-npm run build
+cd ultron && npm install && npm run build
+node dist/index.js init    # autoconfig MCP for Claude Code + Cursor
+
+# Option B: npm (after publish)
+npx ultron-hub init
 ```
 
-> **Requires Node.js >= 18** and a C++ compiler (for `better-sqlite3`).  
-> On Ubuntu/Debian: `sudo apt install build-essential`  
-> On macOS: Xcode Command Line Tools (`xcode-select --install`)
+Restart your IDE. First call: `onboard()` or `session_start("my-project", "cursor")`.
 
----
-
-## Connect to Claude Code
-
-Add to `~/.mcp.json` (global) or your project's `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "ultron": {
-      "command": "node",
-      "args": ["/absolute/path/to/ultron/dist/index.js"]
-    }
-  }
-}
-```
-
-Replace `/absolute/path/to/ultron` with the actual path where you cloned the repo.  
-Example: `/home/youruser/tools/ultron/dist/index.js`
-
-Restart Claude Code. You'll see `✓ ultron: ultron-hub v6.0.0 — Connected`.
-
-## Connect to Cursor
-
-Go to **Settings → MCP** and add:
-
-```json
-{
-  "mcpServers": {
-    "ultron": {
-      "command": "node",
-      "args": ["/absolute/path/to/ultron/dist/index.js"]
-    }
-  }
-}
-```
-
----
-
-## How It Works
-
-```
-~/.ultron/ultron.db   ← SQLite, auto-created on first run
-         │
-         ├── Claude Code (MCP)
-         ├── Cursor (MCP)
-         └── Claude.ai / ChatGPT (via handoff tool)
-```
-
-All tools share the same local database. Switch tools mid-session — your context is already there.
+**AI agents:** read [AGENTS.md](AGENTS.md) — instant protocol for models exploring or using ULTRON.
 
 ---
 
@@ -77,206 +31,146 @@ All tools share the same local database. Switch tools mid-session — your conte
 
 **1. Start every session:**
 ```
-session_start("my-project", "claude-code")
+session_start("my-project", "cursor", slim=true)
 ```
-Returns last session summary, pending tasks, knowledge base, and recent decisions.  
-Warnings and critical patterns load first. Ready to work in one call.
 
 **2. Save knowledge as you go:**
 ```
-remember("my-project", "api-pattern", "All endpoints return { success, data?, error? }", "pattern")
-remember("my-project", "stripe-flow", "...", "pattern", related=["payment-hook", "webhook-handler"])
-decision("my-project", "database", "PostgreSQL", "better Prisma support than MySQL")
-task("my-project", "add", "implement Stripe webhook", tags=["payments", "urgent"])
-note("my-project", "check Stripe rate limits in test mode")
+remember("my-project", "auth-gotcha", "JWT expires in 5m in dev", "warning")
+decision("my-project", "database", "PostgreSQL", "better Prisma support")
+task("my-project", "add", "implement Stripe webhook", tags=["payments"])
 ```
 
 **3. Close the session:**
 ```
-session_end("my-project", "claude-code", "finished PaymentForm, webhook pending", ["src/PaymentForm.tsx"])
+session_end("my-project", "cursor", "finished PaymentForm", ["src/PaymentForm.tsx"])
 ```
-Automatically saves a `_snapshot` memory — compressed project state for fast future recall.
+
+Every response includes `next_actions` — the agent always knows what to do next.
 
 ---
 
-## All 18 Tools
+## All 25 tools
 
-### Memory
+### Memory (5)
+| Tool | Purpose |
+|------|---------|
+| `recall` | Load project context manually |
+| `remember` | Save persistent knowledge + auto-embed |
+| `note` | Quick thought with auto key |
+| `forget` | Delete memory (+ vector + graph links) |
+| `search` | Hybrid keyword+semantic search |
 
-| Tool | What it does |
-|---|---|
-| `session_start` | Start session + auto-load full context (warnings first) |
-| `recall` | Load project context manually (slim mode, field filter) |
-| `remember` | Save persistent key-value knowledge + optional `related` links |
-| `note` | Quick thought with auto-generated key |
-| `forget` | Delete a memory by key |
-| `search` | Full-text search (FTS5) across memories, decisions, tasks |
-| `clean` | List/archive stale memories (not accessed in 45+ days) |
+### Session (5)
+| Tool | Purpose |
+|------|---------|
+| `session_start` | Start session + load full context |
+| `session_end` | Close session + refresh snapshot |
+| `projects` | List all projects with stats |
+| `handoff` | Markdown block for web chats |
+| `onboard` | Full ULTRON protocol in one call |
 
-### Tasks & Decisions
+### Work (3)
+| Tool | Purpose |
+|------|---------|
+| `task` | Backlog: add, update, done, list, delete |
+| `decision` | Log immutable technical decision |
+| `list_decisions` | Decision history with supersedes chain |
 
-| Tool | What it does |
-|---|---|
-| `task` | Backlog management: `add`, `update`, `done`, `delete`, `list` + tags + filter_tag |
-| `decision` | Log an immutable technical decision |
-| `list_decisions` | Full decision history with pagination |
+### Intelligence (6)
+| Tool | Purpose |
+|------|---------|
+| `health` | Project integrity diagnostics |
+| `metrics` | Usage + semantic coverage |
+| `graph` | Knowledge graph neighborhood |
+| `compress` | Merge overlapping memories |
+| `generate_rules` | Export rules (claude/cursor/agents format) |
+| `token_budget` | Token cost estimate + suggestions |
 
-### Sessions & Projects
+### Sync (2)
+| Tool | Purpose |
+|------|---------|
+| `export_project` | Full JSON export (links, agents, runs) |
+| `import_project` | Import with auto re-embed |
 
-| Tool | What it does |
-|---|---|
-| `session_end` | Close session with summary + auto-snapshot |
-| `projects` | List all projects with stats (tasks, memories, decisions) |
-| `handoff` | Generate markdown context block for Claude.ai / ChatGPT |
+### Agents (3)
+| Tool | Purpose |
+|------|---------|
+| `agent_register` | Register subagent/daemon |
+| `agent_log` | Audit agent runs |
+| `agent_handoff` | Pass context between agents |
 
-### Intelligence
+### MCP Resources (3)
+| URI | Content |
+|-----|---------|
+| `ultron://projects` | All projects with stats |
+| `ultron://{project}/context` | Slim project context |
+| `ultron://{project}/rules` | Rules and warnings |
 
-| Tool | What it does |
-|---|---|
-| `generate_rules` | Convert stored warnings/patterns into CLAUDE.md rules |
-| `token_budget` | Estimate token cost per project + stale memory count |
-
-### Sync
-
-| Tool | What it does |
-|---|---|
-| `export_project` | Export all project data as JSON |
-| `import_project` | Import JSON with `merge` or `replace` strategy |
+### MCP Prompts (3)
+`start-session` · `end-session` · `audit-memory`
 
 ---
 
-## Memory Categories
+## Memory categories
 
 | Category | Use |
-|---|---|
-| `fact` | Stack, URLs, versions, env var names |
-| `pattern` | Architecture patterns, code conventions to follow |
-| `preference` | Team style, tools chosen, personal workflow |
-| `warning` | Things to avoid — known bugs, gotchas, past mistakes |
-| `note` | Free-form observations and quick thoughts |
-
-`warning` and `pattern` are the most valuable — they load first on `session_start` and become CLAUDE.md rules via `generate_rules`.
+|----------|-----|
+| `rule` | Non-negotiable — always injected first |
+| `warning` | Things to avoid — learned from mistakes |
+| `pattern` | Architecture patterns to follow |
+| `preference` | Team style and conventions |
+| `fact` | Stack, URLs, versions |
+| `note` | Free-form observations |
 
 ---
 
-## Token Efficiency
+## Token efficiency
 
 ```
-# Slim mode: keys only, no values — saves ~80% tokens on memories
-session_start("project", "claude-code", slim=true)
-
-# Load only what you need
-recall("project", fields=["tasks"])
-recall("project", fields=["memories", "decisions"])
-
-# Check token cost + stale memory count
-token_budget("project")
-
-# Clean up stale memories (not accessed in 45+ days)
-clean("project")                      # list them
-clean("project", action="archive")    # delete all stale
+session_start("project", "cursor", slim=true)     # ~80% fewer tokens
+recall("project", fields=["tasks"])                # load subset only
+token_budget("project")                            # check cost
+clean("project", action="archive")                 # remove stale
 ```
 
 ---
 
-## Linked Knowledge Graph
-
-```
-# Link related memories together
-remember("my-project", "payment-flow", "...", "pattern",
-  related=["stripe-webhook", "idempotency-key"])
-
-# When you recall payment-flow, you see its related keys
-# → navigate the knowledge graph with search()
-```
-
----
-
-## Task Tags
-
-```
-# Add tasks with tags
-task("my-project", "add", "fix auth redirect", tags=["auth", "bug"])
-task("my-project", "add", "add Stripe webhook", tags=["payments"])
-
-# Filter tasks by tag
-task("my-project", "list", filter_tag="auth")
-# → shows only tasks tagged "auth"
-```
-
----
-
-## Auto-Snapshot
-
-Every `session_end` automatically saves a `_snapshot` memory — a compressed summary of:
-- What was done this session
-- Files touched
-- Pending tasks (top 5)
-- Most recently used memory keys
-
-This makes the next `session_start` faster: even with `slim=true`, the snapshot gives full project orientation in one line.
-
----
-
-## Generate CLAUDE.md Rules
-
-```
-generate_rules("my-project")
-```
-
-Reads all `warning` and `pattern` memories and outputs ready-to-paste CLAUDE.md rules:
-
-```markdown
-# Project Rules: my-project
-
-## Avoid
-- Never mock the database in integration tests — mocked tests passed but prod migration failed
-- Don't use positional task IDs in parallel calls — positions shift when tasks complete
-
-## Follow
-- All API responses use { success, data?, error? } — never return raw data
-- Controllers never access the DB directly — always go through services
-```
-
-Paste into your project's `CLAUDE.md` for permanent, zero-token guidance.
-
----
-
-## Sync Between Machines
-
-```
-# Machine A — export
-export_project("my-project")
-# → Copy the JSON from the response
-
-# Machine B — import
-import_project('<json>', "merge")
-# merge = keep newer data  |  replace = overwrite everything
-```
-
----
-
-## Updating
+## Daemon (background maintenance)
 
 ```bash
-cd ultron
-git pull
-npm run build
+ultron-daemon --once          # run all maintenance once
+ultron-daemon                 # loop every 6h
+ultron-daemon --once --dry    # preview without changes
 ```
 
-Restart Claude Code / Cursor after updating.
+Tasks: purge expired, decay importance, backfill embeddings, incremental graph links, rotating DB backups.
+
+---
+
+## Connect to Claude Code / Cursor
+
+```json
+{
+  "mcpServers": {
+    "ultron": {
+      "command": "node",
+      "args": ["/absolute/path/to/ultron/dist/index.js"]
+    }
+  }
+}
+```
+
+Or run `node dist/index.js init` to configure automatically.
 
 ---
 
 ## Data
 
-All data lives in `~/.ultron/ultron.db` — a single SQLite file.
+All data in `~/.ultron/ultron.db`. Backups in `~/.ultron/backups/`.
 
 ```bash
-# Custom location
-ULTRON_DB_PATH=/custom/path/ultron.db node dist/index.js
-
-# Backup
+ULTRON_DB_PATH=/custom/path.db node dist/index.js
 cp ~/.ultron/ultron.db ~/backups/ultron-$(date +%Y%m%d).db
 ```
 
@@ -285,7 +179,7 @@ cp ~/.ultron/ultron.db ~/backups/ultron-$(date +%Y%m%d).db
 ## Requirements
 
 - Node.js >= 18
-- C++ build tools (`build-essential` on Linux, Xcode CLI on macOS)
+- C++ build tools (for `better-sqlite3`)
 - No external services, accounts, or API keys
 
 ---

@@ -1,4 +1,6 @@
-// ── ULTRON v8 — MCP result helpers ───────────────────────────────────────────
+// ── ULTRON v9 — MCP result helpers ───────────────────────────────────────────
+
+import { log } from "./logger.js";
 
 export type McpResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -20,6 +22,7 @@ export function err(message: string): McpResult {
 /** Extract error message and log to stderr */
 export function errOf(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
+  log.error("operation failed", { error: msg });
   return msg;
 }
 

@@ -1,60 +1,52 @@
-// ── ULTRON v8 — agent ecosystem tools ─────────────────────────────────────────
-// agent_register · agent_log · agent_handoff — let autonomous/interactive agents
-// register, audit their runs, and pass structured context to each other.
+// ── ULTRON v9 — agent ecosystem tools ─────────────────────────────────────────
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { db, uuid } from "../db/connection.js";
-import { ok, err, errOf, now } from "../lib/result.js";
+import { defineTool } from "../lib/define-tool.js";
+import { withActions } from "../lib/next-actions.js";
+import * as agentRepo from "../repositories/agent.repo.js";
 
 export function registerAgentTools(server: McpServer): void {
-  server.tool(
-    "agent_register",
-    `Register an agent in the ULTRON ecosystem. type: subagent (interactive) | daemon (background).`,
+  defineTool(
+    server, "agent_register",
+    `Register an agent in the ULTRON ecosystem.
+WHEN: A subagent or daemon starts working on a project.
+Example: agent_register("ultron-architect", type="subagent", capabilities=["architecture"])
+type: subagent (interactive) | daemon (background).`,
     { name: z.string(), type: z.enum(["subagent", "daemon"]).optional().default("subagent"), capabilities: z.array(z.string()).optional() },
     ({ name, type, capabilities }) => {
-      try {
-        db.prepare(
-          `INSERT INTO agents (id, name, type, capabilities) VALUES (?, ?, ?, ?)
-           ON CONFLICT (name) DO UPDATE SET type = excluded.type, capabilities = excluded.capabilities`
-        ).run(uuid(), name, type ?? "subagent", JSON.stringify(capabilities ?? []));
-        return ok({ registered: true, name, type: type ?? "subagent", capabilities: capabilities ?? [] });
-      } catch (e) { return err(errOf(e)); }
+      agentRepo.registerAgent(name, type ?? "subagent", capabilities ?? []);
+      return withActions({ registered: true, name, type: type ?? "subagent", capabilities: capabilities ?? [] }, ["Use agent_log to audit runs"]);
     }
   );
 
-  server.tool(
-    "agent_log",
-    `Record what an agent did — an audit entry in agent_runs. Use ended=true to close an open run.`,
+  defineTool(
+    server, "agent_log",
+    `Record what an agent did — audit entry in agent_runs.
+WHEN: Start/end of agent work, or significant milestones.
+Example: agent_log("ultron-architect", "audit-complete", project="api", detail="score 71/100")
+Use ended=true + run_id to close an open run.`,
     { agent: z.string(), action: z.string(), project: z.string().optional(), detail: z.string().optional(), run_id: z.string().optional(), ended: z.boolean().optional() },
     ({ agent, action, project, detail, run_id, ended }) => {
-      try {
-        if (run_id && ended) {
-          db.prepare("UPDATE agent_runs SET ended_at = ?, detail = COALESCE(?, detail) WHERE id = ?").run(now(), detail ?? null, run_id);
-          return ok({ logged: true, run_id, ended: true });
-        }
-        const id = uuid();
-        db.prepare("INSERT INTO agent_runs (id, agent, project, action, detail) VALUES (?, ?, ?, ?, ?)").run(id, agent, project ?? null, action, detail ?? null);
-        return ok({ logged: true, run_id: id, agent, action });
-      } catch (e) { return err(errOf(e)); }
+      if (run_id && ended) {
+        agentRepo.endRun(run_id, detail ?? null);
+        return { logged: true, run_id, ended: true };
+      }
+      const id = agentRepo.logRun(agent, action, project ?? null, detail ?? null);
+      return { logged: true, run_id: id, agent, action };
     }
   );
 
-  server.tool(
-    "agent_handoff",
-    `One agent leaves structured context for another. Stored as a high-importance memory keyed by target agent.
-The receiving agent reads it via recall/search. Enables shared memory across the agent ecosystem.`,
+  defineTool(
+    server, "agent_handoff",
+    `One agent leaves structured context for another. Stored as high-importance memory.
+WHEN: Subagent finishes and parent/other agent needs to continue.
+Example: agent_handoff("api", from_agent="auditor", to_agent="implementer", context="Fix P0 vector cleanup first")
+Receiving agent reads via recall/search for key handoff-{to_agent}.`,
     { project: z.string(), from_agent: z.string(), to_agent: z.string(), context: z.string() },
-    ({ project, from_agent, to_agent, context }) => {
-      try {
-        const key = `handoff-${to_agent}`;
-        db.prepare(
-          `INSERT INTO memories (id, project, key, value, category, importance, tool, agent, updated_at, embedded_at)
-           VALUES (?, ?, ?, ?, 'note', 8, 'agent', ?, datetime('now'), NULL)
-           ON CONFLICT (project, key) DO UPDATE SET value = excluded.value, agent = excluded.agent, updated_at = excluded.updated_at, embedded_at = NULL`
-        ).run(uuid(), project, key, `[from ${from_agent} → ${to_agent}] ${context}`, from_agent);
-        return ok({ handed_off: true, project, from_agent, to_agent, key });
-      } catch (e) { return err(errOf(e)); }
+    async ({ project, from_agent, to_agent, context }) => {
+      const { key } = await agentRepo.handoff(project, from_agent, to_agent, context);
+      return withActions({ handed_off: true, project, from_agent, to_agent, key }, [`Agent ${to_agent} should search("${project}", "${key}") or recall()`]);
     }
   );
 }

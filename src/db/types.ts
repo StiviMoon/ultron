@@ -40,6 +40,7 @@ export interface DecisionRow {
   choice: string;
   reason: string;
   tool: string | null;
+  supersedes: string | null;
   created_at: string;
 }
 
